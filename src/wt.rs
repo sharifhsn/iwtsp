@@ -1,9 +1,19 @@
-use nalgebra::{DMatrix, DVector};
+use argmin::{
+    core::{CostFunction, Executor, Gradient, Hessian, Jacobian, State},
+    solver::{
+        linesearch::{BacktrackingLineSearch, condition::ArmijoCondition},
+        neldermead::NelderMead,
+        quasinewton::LBFGS,
+    },
+};
+use nalgebra::{DMatrix, DVector, dvector};
 use statrs::{
     distribution::{Continuous, ContinuousCDF, Normal},
     function::gamma,
 };
 use std::time::Instant;
+
+use std::sync::LazyLock;
 
 pub struct Sampler {
     pub m: usize,
@@ -21,12 +31,10 @@ impl Sampler {
             } else {
                 i + 1
             };
-            println!("i = {i}");
             // Xu et al. (2013) p. 863 equation (6)
             (i as f64 - 0.5).powf(gamma) / m as f64
         });
         q /= q.sum();
-        println!("q = {}", q);
         Self { m, gamma, q }
     }
 
@@ -46,13 +54,21 @@ impl CostFunction for Sampler {
         // Xu et al. (2013) p. 863 equation (8)
 
         // first constraint
-        if self.q.dot(z).abs() > TOL {
+        let mean = self.q.dot(z).abs();
+        if mean > TOL {
             println!("first constraint failed: {}", self.q.dot(z));
-            return Ok(LARGE_COST);
+            return Ok(LARGE_COST * (mean - TOL));
         }
         // second constraint
-        if (self.q.dot(&z.map(|z_i| z_i.powi(2))) - 1.0).abs() > TOL {
-            return Ok(LARGE_COST);
+        let var = self.q.dot(&z.map(|z_i| z_i.powi(2))).abs();
+        if (var - 1.0).abs() > TOL {
+            println!("q = {}", self.q);
+            println!("z = {}", z);
+            println!(
+                "second constraint failed: {}",
+                self.q.dot(&z.map(|z_i| z_i.powi(2)))
+            );
+            return Ok(LARGE_COST * (var - 1.0 - TOL).abs());
         }
         // third constraint
         // Xu et al. (2013) p. 863 paragraph 2
@@ -64,11 +80,13 @@ impl CostFunction for Sampler {
                 _ => Normal::standard().inverse_cdf(self.q.iter().take(i).sum()),
             })
             .collect();
+        // println!("z = {:?}", z);
         assert!(Z.len() == self.m + 1);
         if z.iter()
             .enumerate()
-            .any(|(i, z_i)| z_i - Z[i - 1] < TOL || Z[i] - z_i < TOL)
+            .any(|(i, z_i)| z_i - Z[i] < TOL || Z[i + 1] - z_i < TOL)
         {
+            println!("third constraint failed: z = {:?}", z);
             return Ok(LARGE_COST);
         }
 
@@ -120,108 +138,67 @@ impl Hessian for Sampler {
     }
 }
 
-fn solve(problem: Sampler, solver: NelderMead<DVector<f64>, f64>) -> DVector<f64> {
-    let res = Executor::new(problem, solver).run().unwrap();
+pub fn a() {
+    let m = 30;
+    let gamma = 0.3;
+
+    let mut q = DVector::from_fn(m, |i, _| {
+        // indexed at 0
+        let i = if i >= m / 2 {
+            // symmetry
+            m - i
+        } else {
+            i + 1
+        };
+        // Xu et al. (2013) p. 863 equation (6)
+        (i as f64 - 0.5).powf(gamma) / m as f64
+    });
+    q /= q.sum();
+
+    let Z: Vec<f64> = (0..=m)
+        .map(|i| match i {
+            0 => -LARGE_COST,
+            // Rust doesn't allow matching against variables
+            i if i == m => LARGE_COST,
+            _ => Normal::standard().inverse_cdf(q.iter().take(i).sum()),
+        })
+        .collect();
+    println!("Z = {:?}", Z);
+
+    let init_param = DVector::from_iterator(m, 1..=m).map(|i| {
+        let mid = (Z[i - 1] + Z[i]) / 2.0;
+        if mid > 10.0 {
+            Z[i - 1] + 0.5
+        } else if mid < -10.0 {
+            Z[i] - 0.5
+        } else {
+            mid
+        }
+    });
+    println!("real init_param = {}", init_param);
+    // let mut init_param = dvector![
+    //     -2.5908, -1.9534, -1.6549, -1.4302, -1.2463, -1.0877, -0.9461, -0.8165, -0.6955, -0.5809,
+    //     -0.4708, -0.3637, -0.2586, -0.1541, -0.0507
+    // ];
+    // let binding = init_param.clone();
+    // let pos = binding.into_iter().rev().map(|x: &f64| x.abs());
+    // init_param.extend(pos);
+    // println!("init_param = {}", init_param);
+    let linesearch = BacktrackingLineSearch::new(ArmijoCondition::new(TOL).unwrap());
+    let solver = LBFGS::new(linesearch, 100);
+    // let z = solve(Sampler::new(m, 0.3), solver);
+    // println!("z = {}", z);
+    let problem = Sampler::new(m, gamma);
+    let res = Executor::new(problem, solver)
+        .configure(|state| state.param(init_param))
+        .run()
+        .unwrap();
     let state = res.state();
     println!("Optimization time: {:?}", state.get_time());
     println!("Number of iterations: {}", state.get_iter());
     println!("Best cost: {}", state.get_best_cost());
-    state.get_best_param().unwrap().clone()
-}
-
-use argmin::{
-    core::{CostFunction, Executor, Gradient, Hessian, Jacobian, State},
-    solver::neldermead::NelderMead,
-};
-pub struct WillowTree {
-    /// The number of time steps
-    pub N: usize,
-    /// The number of spatial nodes at each time step
-    pub m: usize,
-    /// Time to end of tree
-    pub T: f64,
-    /// Time step size
-    pub h: f64,
-    /// The willow tree structure
-    pub tree: DMatrix<f64>,
-}
-
-impl WillowTree {
-    pub fn new(N: usize, m: usize, T: f64) -> Self {
-        let h = T / N as f64;
-        let tree = DMatrix::zeros(N, m + 1);
-        Self { N, m, T, h, tree }
-    }
-
-    pub fn solve(&self, k: usize) -> f64 {
-        let v: DVector<f64> = DVector::zeros(self.m * self.m);
-
-        todo!()
-    }
-}
-
-/// Recombining tree structure for the Willow Tree model.
-pub struct EuropeanOption {
-    /// Initial underlying asset price
-    pub S0: f64,
-    /// Risk-free interest rate
-    pub r: f64,
-    /// Volatility of the underlying asset
-    pub sigma: f64,
-    /// Time to maturity in years
-    pub T: f64,
-    /// Number of discrete time steps
-    pub N: usize,
-    /// Number of spatial nodes at each time step
-    ///
-    /// Accuracy improvement becomes insignificant beyond 30 nodes
-    pub m: usize,
-    /// Time step size
-    pub dt: f64,
-}
-
-impl EuropeanOption {
-    pub fn new(S0: f64, r: f64, sigma: f64, T: f64, N: usize, m: usize) -> Self {
-        Self {
-            S0,
-            r,
-            sigma,
-            T,
-            N,
-            m,
-            dt: T / N as f64,
-        }
-    }
-
-    pub fn markov_process(&self) -> f64 {
-        let mut discrete_normal = vec![];
-        for i in 1..=self.m {
-            // z is the representative normal variate
-            // in other words, the value that the standard normal takes
-            let z_i = Normal::standard().inverse_cdf((i as f64 - 0.5) / self.m as f64);
-            // q_i is the probability of z_i occurring
-            // we are dividing the standard normal equally into m intervals
-            // so the probability of each interval is 1/m
-            let q_i = 1.0 / self.m as f64;
-            discrete_normal.push((z_i, q_i));
-        }
-        todo!()
-    }
-}
-
-pub fn a() {
-    let m = 30;
-
-    let init_param: DVector<f64> = DVector::from_iterator(m, 1..=m)
-        .map(|i| Normal::standard().inverse_cdf((i as f64 - 0.5) / m as f64));
-    let simplex = vec![
-        init_param.clone(),
-        init_param.map(|x| x + 0.01),
-        init_param.map(|x| x - 0.01),
-    ];
-    let solver = NelderMead::new(simplex);
-    let z = solve(Sampler::new(m, 0.3), solver);
-    println!("z = {}", z);
+    let z = state.get_best_param().unwrap().clone();
+    println!("Best parameter: {}", z);
     // let num_gammas = 1000;
     // let gammas: Vec<f64> = (0..num_gammas)
     //     .map(|i| i as f64 / (num_gammas as f64 - 1.0))

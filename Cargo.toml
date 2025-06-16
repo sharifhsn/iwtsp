@@ -1,5 +1,5 @@
 [package]
-name = "iwtsr"
+name = "iwtsp"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,4 +7,8 @@ edition = "2024"
 argmin = "0.10"
 argmin-math = { version = "0.4", features = ["nalgebra_latest"] }
 nalgebra = "0.32"
+reverse = "0.2.2"
 statrs = "0.17"
+
+[profile.release]
+lto = "fat"
