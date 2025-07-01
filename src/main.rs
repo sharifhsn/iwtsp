@@ -1,5 +1,7 @@
-use iwtsp::ad::a;
-// use iwtsp::wt::a;
+// use iwtsp::ad::a;
+use iwtsp::jl::sampler;
+
+use jlrs::prelude::*;
 fn main() {
-    a();
+    sampler();
 }

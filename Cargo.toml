@@ -6,9 +6,9 @@ edition = "2024"
 [dependencies]
 argmin = "0.10"
 argmin-math = { version = "0.4", features = ["nalgebra_latest"] }
+indexmap = "2.9.0"
+jlrs = { version = "0.21", features = ["julia-1-11", "local-rt", "jlrs-derive", "jlrs-ndarray", "diagnostics"] }
 nalgebra = "0.32"
 reverse = "0.2.2"
+rooc = "0.1"
 statrs = "0.17"
-
-[profile.release]
-lto = "fat"

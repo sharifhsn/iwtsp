@@ -1,0 +1,4234 @@
+# jlrs tutorial
+
+# Introduction
+
+jlrs is a crate for Rust-Julia interop. It can be used to embed Julia in Rust applications, and to create dynamic libraries that expose functionality written in Rust to Julia. This tutorial will get you up to speed to effectively use jlrs.
+
+After installing all dependencies, we'll start embedding Julia in Rust applications. Important topics are introduced incrementally, later chapters will build on information found in earlier ones. When we've gotten familiar with jlrs, two additional runtimes are introduced. The final major topic is exposing Rust code to Julia, first without using jlrs and then with.
+
+If you're not interested in embedding Julia, you can skip the additional runtime chapters and read the chapters about dynamic libraries instead. If you're only interested in exposing Rust code to Julia without using jlrs, reading chapters 5 and 11 should be sufficient.
+
+
+# Dependencies
+
+Before we can use jlrs, we have to install several dependencies: a supported version of Julia, a supported version of Rust, and a C compiler.
+
+
+# Julia
+
+jlrs currently supports Julia 1.6 up to and including Julia 1.11. Using the most recent stable version is recommended. While juliaup can be used, manually installing Julia is recommended. The reason is that to compile jlrs successfully, the path to the Julia's header files and library must be known and this can be tricky to achieve with juliaup.
+
+There are several platform-dependent ways to make these paths known:
+
+#### Linux
+
+If `julia` is on your `PATH` at `/path/to/bin/julia`, the main header file is expected to live at `/path/to/include/julia/julia.h` and the library at `/path/to/lib/libjulia.so`. If you do not want to add `julia` to your `PATH`, you can set the `JULIA_DIR` environment variable instead. If `JULIA_DIR=/path/to`, the headers and library must live at the previously mentioned paths.
+
+The directory that contains `libjulia.so` must be on the library search path. If this is not the case and the library lives at `/path/to/lib/libjulia.so`, you must add `/path/to/lib/` to the `LD_LIBRARY_PATH` environment variable.
+
+#### Windows
+
+If `julia` is on your `Path` at `X:\path\to\bin\julia.exe`, the main header file is expected to live at `X:\path\to\include\julia\julia.h` and the library at `X:\path\to\bin\libjulia.dll`. You can set the `JULIA_DIR` environment variable instead. If `JULIA_DIR=X:\path\to`, the headers and library must live at the previously mentioned paths.
+
+The directory that contains `libjulia.dll` must be on your `Path` at runtime if Julia is embedded.
+
+#### MacOS
+
+If `julia` is on your `PATH` at `/path/to/bin/julia`, the main header file is expected to live at `/path/to/include/julia/julia.h` and the library at `/path/to/lib/libjulia.dylib`. If you do not want to add `julia` to your `PATH`, you can set the `JULIA_DIR` environment variable instead. If `JULIA_DIR=/path/to`, the headers and library must live at the previously mentioned paths.
+
+The directory that contains `libjulia.dylib` must be on the library search path. If this is not the case and the library lives at `/path/to/lib/libjulia.dylib`, you must add `/path/to/lib/` to the `DYLD_LIBRARY_PATH` environment variable.
+
+
+# Rust
+
+The minimum supported Rust version (MSRV) is currently 1.77, but some features may require a more recent version. The MSRV can be bumped in minor releases of jlrs.[^1]
+
+Note for Windows users: only the GNU toolchain is supported for dynamic libraries, applications that embed Julia can use either the GNU or MSVC toolchain.
+
+[^1]: The informal policy is that the MSRV must not exceed the version used by Yggdrasil.
+
+
+# C
+
+jlrs depends on some code written in C. On Linux and MacOS a recent version of GCC or clang can be used. On Windows we can use either MSVC or MinGW as long as it matches the flavor of our Rust toolchain.
+
+
+# Version features
+
+If we add jlrs as a dependency and try to compile our crate, we'll see that this fails even after following the instructions in the previous chapter. The reason is that there's an issue we need to deal with: the Julia C API is not stable and each new version tends to introduce a few minor, but backwards-incompatible, changes. jlrs strives to handle these incompatibilities internally as much as possible, but this requires enabling a feature to select the targeted version of Julia.
+
+Features that select the targeted version of Julia are called version features. They are admittedly kind of a hack because version features are not additive; we must enable exactly one, and it must match the version of Julia that is used. If multiple version features, no version features, or an incorrect version feature is used, compilation will fail.
+
+The following version features currently exist:
+
+- `julia-1-6`
+- `julia-1-7`
+- `julia-1-8`
+- `julia-1-9`
+- `julia-1-10`
+- `julia-1-11`
+
+It's recommended to "reexport" these version features, and enable the correct one at compile time.
+
+```toml
+[features]
+julia-1-6 = ["jlrs/julia-1-6"]
+julia-1-7 = ["jlrs/julia-1-7"]
+# etc...
+```
+
+
+# Basics
+
+In this chapter we're going to cover the basics of using jlrs by embedding Julia in a Rust application.
+
+Topics that will be covered include setting up a project and configuring it to embed Julia, evaluating Julia code and calling Julia functions from Rust, converting data between Rust and Julia, and loading installed packages.
+
+
+# Project setup
+
+We first create a new binary package with `cargo`:
+
+```bash
+cargo new julia_app --bin
+```
+
+Open `Cargo.toml`, add jlrs as a dependency and enable the `local_rt` feature. We abort on panics[^1], and reexport the version features:
+
+```toml
+[package]
+name = "julia_app"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+julia-1-6 = ["jlrs/julia-1-6"]
+julia-1-7 = ["jlrs/julia-1-7"]
+julia-1-8 = ["jlrs/julia-1-8"]
+julia-1-9 = ["jlrs/julia-1-9"]
+julia-1-10 = ["jlrs/julia-1-10"]
+julia-1-11 = ["jlrs/julia-1-11"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+jlrs = {version = "0.21", features = ["local-rt"]}
+```
+
+If we tried to build our application without enabling a version feature, we'd see the following error:
+
+```text
+error: A Julia version must be selected by enabling exactly one of the following version features:
+           julia-1-6
+           julia-1-7
+           julia-1-8
+           julia-1-9
+           julia-1-10
+           julia-1-11
+```
+
+If Julia 1.10 has been installed and we've configured our environment according to the steps in the [dependency chapter], building and running should succeed after enabling the `julia-1-10` feature:
+
+```bash
+cargo build --features julia-1-10
+```
+
+It's important to set the `-rdynamic` linker flag when we embed Julia on Linux, Julia will perform badly otherwise.[^2] This flag can be set on the command line with the `RUSTFLAGS` environment variable:
+
+`RUSTFLAGS="-Clink-args=-rdynamic" cargo build --features julia-1-10`
+
+It's also possible to set this flag with a `config.toml` file in the project's root directory:
+
+```toml
+[target.linux]
+rustflags = [ "-C", "link-args=-rdynamic" ]
+```
+
+[dependency chapter]: ../01-dependencies/julia.md
+
+[^1]: In certain circumstances panicking can cause soundness issues, so it's better to abort.
+
+[^2]: The nitty-gritty reason is that there's some thread-local data that Julia uses constantly. To effectively access this data, it must be defined in an application so the most performant TLS model can be used. By setting the `-rdynamic` linker flag, `libjulia` can find and make use of the definition in our application. If this flag hasn't been set Julia will fall back to a slower TLS model, which has signifant, negative performance implications. This is only important on Linux, macOS and Windows users can ignore this entirely because the concept of TLS models don't exists on these platforms.
+
+
+# Scopes and evaluating Julia code
+
+There are three steps our application needs to take to evaluate
+
+```julia
+println("Hello world!")
+```
+
+1. Configure and start the Julia runtime.
+2. Create a scope.
+3. Evaluate the code inside the scope.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 1>(|mut frame| {
+        // Safety: we only evaluate a print statement, which is perfectly safe.
+        unsafe {
+            Value::eval_string(&mut frame, "println(\"Hello, world!\")")
+        }.expect("an exception occurred");
+    });
+}
+```
+
+Let's go through this code step-by-step.
+
+```rust,ignore
+let handle = Builder::new().start_local().expect("cannot init Julia");
+```
+
+This line initializes Julia and returns a `LocalHandle` to the runtime. The `Builder` lets us configure the runtime, options include setting the number of threads Julia can use and using a custom system image. When the runtime is started, the JlrsCore.jl package is loaded automatically.[^1]
+
+The handle lets us call into Julia from the current thread, the runtime shuts down when it's dropped. Julia can only be initialized once per process, and can't be reinitialized after it has shut down.
+
+```rust,ignore
+handle.local_scope::<_, 1>(|mut frame| { /*snip*/ });
+```
+
+Before we can call into Julia we have to create a scope by calling `LocalHandle::local_scope` first. This method takes a constant generic integer and a closure that provides access to a frame. The frame is used to prevent data that is managed by Julia's garbage collector, or GC, from being freed while we're using it from Rust. This is called rooting. We'll call such data managed data.
+
+An important question to ask is: when can the GC be triggered? The rough answer is whenever managed data is allocated. If the GC is triggered from some thread, it will wait until all threads that can call into Julia have reached a safepoint. Because we're only using a single thread, there are no other threads that need to reach a safepoint and the GC can run immediately, we'll leave it at that for now.
+
+Functions provided by jlrs that return managed data are typically called with a mutable reference to a frame.[^2] These functions can only be called inside a scope, and their result is rooted in the frame. As long as managed data is rooted, it, and any other managed data it refers to, will not be freed by the GC. Every time data is rooted in a frame one of its slots is consumed, the number of slots is expressed by the constant generic integer. It's unfortunate, but its value can't be inferred. We need to count how many slots we use.
+
+```rust,ignore
+|mut frame| {
+    // Safety: we only call print with a string, which is perfectly safe.
+    unsafe { Value::eval_string(&mut frame, "println(\"Hello, world!\")") }
+        .expect("an exception occurred");
+}
+```
+
+Inside the closure we call `Value::eval_string`, which lets us evaluate arbitrary Julia code. It takes a mutable reference to our frame and a string to evaluate, and returns the result as a `Value` rooted in this frame.[^3] A `Value` is managed data of an arbitrary type.[^4] It's unsafe to call this function because it lets us evaluate arbitrary Julia code, including silly and obviously unsound things like `unsafe_load(Ptr{UInt}(C_NULL))`.
+
+A nice property of scopes is that they naturally introduce a lifetime. Instances of `Value` and other managed types make use of this lifetime to ensure they can't outlive their scope. If we tried to remove the semicolon after `expect` our code would fail to compile because the result doesn't live long enough.
+
+[^1]: If JlrsCore hasn't been installed, it will be installed by default. We can customize this with `Builder::install_jlrs_core`. Successfully loading JlrsCore is required to use jlrs.
+
+[^2]: There are other types that can be used instead of mutable references to frames, collectively these types are called targets. We'll cover targets in the next chapter.
+
+[^3]: The actual argument and return types are a bit more involved. Like footnote 2, this will be covered in the next chapter.
+
+[^4]: In this particular case `nothing` is returned, whose type is `Nothing`. If we had evaluated `1 + 2` instead, the `Value` would have contained an `Int`.
+
+
+# Managed data and functions
+
+In the previous section we printed `"Hello, World!"` from Julia by evaluating `println("Hello, World!")`. While there's a lot we can achieve by using Julia this way, it's inflexible and has many limitations. One of these limitations is that, modulo string formatting and other gnarly work-arounds, we can't change the argument `println` is called with.
+
+What we really want to do is call Julia functions with arbitrary arguments. Let's start with `println(1)`.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 3>(|mut frame| {
+        let one = Value::new(&mut frame, 1usize);
+        let println_fn = Module::base(&frame)
+            .global(&mut frame, "println")
+            .expect("println not found in Base");
+
+        // Safety: calling println with an integer is safe
+        unsafe { println_fn.call1(&mut frame, one).expect("println threw an exception") };
+    });
+}
+```
+
+The capacity of the frame is set to `3` because `&mut frame` is used three times to root managed data.
+
+The first use of the frame happens in the call to `Value::new`, which converts data from Rust to Julia. Julia calls this boxing, to avoid confusion with boxing in Rust we'll call it "creating a value" or "converting to managed data" instead. Any type that implements `IntoJulia` can be converted to managed data with this function, jlrs provides implementations of this trait for primitive types, pointer types, and tuples with 32 or fewer fields.
+
+Most functions are globals in a module, `println` is defined in the `Base` module. Julia modules can be accessed via the `Module` type, which is a managed type just like `Value`. The functions `Module::base` and `Module::main` provide access to the `Base` and `Main` modules respectively. These functions take an immutable reference to a frame to prevent them from existing outside a scope, but they don't need to be rooted and this doesn't count as a use of the frame. Globals in Julia modules can be accessed with `Module::global`, we use the frame a second time when we call this method to root its result.[^1]
+
+Finally we call `println_fn` with the frame and one argument. This is the third and last use of the frame. Any `Value` is potentially callable, the `Call` trait provides methods to call them with any number of arguments. Specialized methods like `Call::call1` exist to call functions with 3 or fewer arguments, `Call::call` accepts an arbitrary number of arguments. Every argument must be a `Value`.
+
+Calling Julia functions is unsafe for mostly the same reason as evaluating Julia code is, nothing prevents us from calling `unsafe_load` with a wild pointer. Other risks involve thread-safety and mutably aliasing data that is directly accessed from Rust, which can't be statically prevented. In practice, most Julia code is as safe to call from Rust as it is from Julia.
+
+One thing that should be noted is that while calling a function is more efficient than evaluating Julia code, each argument is passed as a `Value`. This means every function call involves dynamically dispatching to the appropriate method, which can cause significant overhead if we call small functions. In practice it's best to do as much as possible in Julia, and keep the code necessary to call it from Rust as simple as possible. This gives Julia the opportunity to optimize, and we avoid the verbosity of the low-level interfaces jlrs exposes.
+
+All of that said, we didn't want to print `1`, we wanted to print `Hello, World!`. If we tried the most obvious thing and replaced `1usize` in the code above with `"Hello, World!"`, we'd see that this would fail to compile because `&str` doesn't implement `IntoJulia`. We need to use another managed type, `JuliaString`, which maps to Julia's `String` type.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 3>(|mut frame| {
+        let s = JuliaString::new(&mut frame, "Hello, World!").as_value();
+        let println_fn = Module::base(&frame)
+            .global(&mut frame, "println")
+            .expect("println not found in Base");
+
+        // Safety: calling println with a string is safe
+        unsafe { println_fn.call1(&mut frame, s).expect("println threw an exception") };
+    });
+}
+```
+
+So far we've encountered three managed types, `Value`, `Module`, and `JuliaString`, we'll see several more in the future. All managed types implement the `Managed` trait and have at least one lifetime that encodes their scope, the method `Managed::as_value` can be used to convert managed data to a `Value`.
+
+[^1]: We didn't need to use the frame a second time here, but that's outside the scope of this chapter.
+
+
+# Casting, unboxing and accessing managed data
+
+So far, the only Julia function we've called is `println`, which isn't particularly interesting because it returns `nothing`. In practice, we often don't just want to call Julia functions for their side-effects, we also want to use their results in Rust.
+
+A `Value` is an instance of some Julia type, managed by the GC. If there's a more specific managed type for that Julia type, we can convert the `Value` by casting it with `Value::cast`.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 1>(|mut frame| {
+        let s = JuliaString::new(&mut frame, "Hello, World!").as_value();
+        assert!(s.cast::<JuliaString>().is_ok());
+
+        let module = Module::main(&frame).as_value();
+        assert!(module.cast::<Module>().is_ok());
+        assert!(module.cast::<JuliaString>().is_err());
+    });
+}
+```
+
+Managed types aren't the only types that map between Rust and Julia. There are many types where the layout in Rust matches the layout of the managed data, including most primitive types. These types implement the `Unbox` trait which lets us extract the data from the `Value` with `Value::unbox`.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 1>(|mut frame| {
+        let one = Value::new(&mut frame, 1usize);
+        let unboxed = one.unbox::<usize>().expect("cannot be unboxed as usize");
+        assert_eq!(unboxed, 1);
+    });
+}
+```
+
+If there's no appropriate type that implements `Unbox` or `Managed`, we can access the fields of a `Value` manually.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 4>(|mut frame| {
+        // Normally, this custom type would have been defined in some module.
+        // Safety: Defining a new type is safe.
+        let custom_type = unsafe {
+            Value::eval_string(
+                &mut frame,
+                "struct CustomType
+                    a::UInt8
+                    b::Bool
+                    CustomType() = new(0x1, false)
+                end
+
+                CustomType",
+            )
+            .expect("cannot create CustomType")
+        };
+
+        // Safety: the constructor of CustomType is safe to call
+        let inst = unsafe {
+            custom_type
+                .call0(&mut frame)
+                .expect("cannot call constructor of CustomType")
+        };
+
+        let a = inst.get_field(&mut frame, "a")
+            .expect("no field named a")
+            .unbox::<u8>()
+            .expect("cannot unbox as u8");
+
+        assert_eq!(a, 1);
+
+        let b = inst.get_field(&mut frame, "b")
+            .expect("no field named b")
+            .unbox::<Bool>()
+            .expect("cannot unbox as Bool")
+            .as_bool();
+
+        assert_eq!(b, false);
+    });
+}
+```
+
+There's a lot going on in this example, but a lot of it is just setup code. We first evaluate some Julia code that defines `CustomType`. Constructors in Julia are just functions linked to a type, so we can call `CustomType`'s constructor by calling the result of the code we've evaluated. Finally, we get to the point and use `Value::get_field` to access the fields before unboxing their content.[^1] The second field is unboxed as a `Bool`, not a `bool`. The Julia `Char` type similarly maps to jlrs's `Char` type. These types exist to avoid any potential mismatches between Rust and Julia.
+
+[^1]: `Value::get_field` accesses a field by name, if we had wanted to access a field of a tuple we would have needed to do so by index with `Value::get_nth_field`. Indexing starts at 0.
+
+
+# Loading packages and other custom code
+
+Everything we've done so far has involved standard functionality that's available directly in jlrs and Julia, at worst we've had to evaluate some code to define a custom type. While it's nice that we can use this essential functionality, it's reasonable that we also want to make use of packages.
+
+Any package that has been installed for the targeted version of Julia can be loaded with `LocalHandle::using`.[^1]
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 1>(|mut frame| {
+        let dot = Module::main(&frame).global(&mut frame, "dot");
+        assert!(dot.is_err());
+    });
+
+    // Safety: LinearAlgebra is a valid package name
+    unsafe {
+        handle.using("LinearAlgebra")
+    }.expect("Package does not exist");
+
+    handle.local_scope::<_, 1>(|mut frame| {
+        let dot = Module::main(&frame).global(&mut frame, "dot");
+        assert!(dot.is_ok());
+    });
+}
+```
+
+The function `dot` isn't defined in the `Main` module until we've called `handle.using("LinearAlgebra")`, which internally just evaluates `using LinearAlgebra`. To restrict our imports, we have to construct a `using` or `import` statement manually and evaluate it with `Value::eval_string`.
+
+Every package we load must have been installed in advance. Unlike the REPL, trying to use a package that hasn't been installed doesn't lead to a prompt to install it, it just fails. After a package has been loaded, its root module can be accessed with `Module::package_root_module`.
+
+Including a file with custom Julia code works similarly; any file can be loaded and evaluated with `LocalHandle::include`, which calls `Main.include` with the provided path. This works well for local development, but figuring out the correct path to the file when we distribute our code can become problematic. In this case it's better to include the content of the file with the `include_str!` macro and evaluate it with `Value::eval_string`.
+
+[^1]: As long as we don't mess with the [`JULIA_DEPOT_PATH` environment variable]
+
+[`JULIA_DEPOT_PATH` environment variable]: https://docs.julialang.org/en/v1/manual/environment-variables/#JULIA_DEPOT_PATH
+
+
+# Targets
+
+In the previous chapter we've seen that we can only interact with Julia inside a scope, where we can use a frame to root managed data. If we look at the signature of any method we've called with a frame, we see that these methods are generic and can take an instance of any type that implements the `Target` trait. Their return type also depends on this target type.
+
+Take the signature of `Call::call0`, for example:
+
+```rust,ignore
+unsafe fn call0<'target, Tgt>(self, target: Tgt) -> ValueResult<'target, 'data, Tgt>
+    where
+        Tgt: Target<'target>;
+```
+
+Any type that implements `Target` is called a target. There are two things a target encodes: whether the result is rooted, and what lifetime restrictions apply to it.
+
+If we call `call0` with `&mut frame`, `ValueResult` is `Result<Value, Value>`. `&frame` also implement `Target`, if we call `call0` with it the result is left unrooted, and `ValueResult` is `Result<ValueRef, ValueRef>`. We say that `&mut frame` is a rooting target, and `&frame` is a non-rooting target.
+
+The difference between `Value` and `ValueRef` is that `Value` is guaranteed to be rooted, `ValueRef` isn't. It's unsafe to use a `ValueRef` in any meaningful way. Distinguishing between rooted and unrooted data at the type level helps avoid accidental use of unrooted data and running into use-after-free issues, which can be hard to debug. Every managed type has a `Ref` alias, we'll call instances of these types unrooted references [to managed data].
+
+The `Result` alias is used with functions that catch exceptions, otherwise `ValueData` is used instead; `ValueResult` is defined as `Result<ValueData, ValueData>`. Every managed type has a `Result` and `Data` alias.
+
+
+# Using targets and nested scopes
+
+Functions that take a target do so by value, which means the target can only be used once.[^1] If we call such a function with `&mut frame`, only one slot of that frame will be used to root the result. This keeps counting the number of slots we need as easy as possible because we only need to count the number of times the frame is used as a target inside the closure.
+
+This does raise an obvious question: what if the function that takes a target needs to root more than one value? The answer is that targets let us create a nested scope.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn add<'target, Tgt>(target: Tgt, a: u8, b: u8) -> ValueResult<'target, 'static, Tgt>
+where
+    Tgt: Target<'target>,
+{
+    target.with_local_scope::<_, _, 3>(|target, mut frame| {
+        let a = Value::new(&mut frame, a);
+        let b = Value::new(&mut frame, b);
+        let func = Module::base(&frame)
+            .global(&mut frame, "+")
+            .expect("+ not found in Base");
+
+        // Safety: calling + is safe.
+        unsafe { func.call2(target, a, b) }
+    })
+}
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 1>(|mut frame| {
+        let result = add(&mut frame, 1, 2).expect("could not add numbers");
+        let unboxed = result.unbox::<u8>().expect("cannot unbox as u8");
+        assert_eq!(unboxed, 3);
+    });
+}
+```
+
+This approach helps avoid rooting managed data longer than necessary. After calling `add`, only its result is rooted. The temporary values we created in that function are no longer rooted because we've left its scope.
+
+It's strongly recommended to avoid writing functions that take a specific target type, and always take a target generically.
+
+[^1]: Some functions take a target by immutable reference and return rooted data. This data is guaranteed to be globally rooted, and the operation won't consume the target.
+
+# Target types
+
+No target types have been named yet, even frames have only been called just that without elaborating what their exact type is. The following table lists all target types, which lifetime is used for `'target`, and whether it's a rooting target or not.
+
+| Type                                | Rooting |
+| ----------------------------------- | ------- |
+| `LocalGcFrame<'target>`             | Yes     |
+| `&mut LocalGcFrame<'target>`        | Yes     |
+| `UnsizedLocalGcFrame<'target>`      | Yes     |
+| `&mut UnsizedLocalGcFrame<'target>` | Yes     |
+| `LocalOutput<'target>`              | Yes     |
+| `&'target mut LocalOutput`          | Yes     |
+| `LocalReusableSlot<'target>`        | Yes     |
+| `&mut LocalReusableSlot<'target>`   | Yes[^1] |
+| `GcFrame<'target>`                  | Yes     |
+| `&mut GcFrame<'target>`             | Yes     |
+| `Output<'target>`                   | Yes     |
+| `&'target mut Output`               | Yes     |
+| `ReusableSlot<'target>`             | Yes     |
+| `&mut ReusableSlot<'target>`        | Yes[^1] |
+| `AsyncGcFrame<'target>`             | Yes     |
+| `&mut AsyncGcFrame<'target>`        | Yes     |
+| `Unrooted`                          | No      |
+| `StackHandle<'target>`              | No      |
+| `Pin<&'target mut WeakHandle>`      | No      |
+| `ActiveHandle<'target>`             | No      |
+| `&Tgt where Tgt: Target<'target>`   | No      |
+
+These targets belong to three different groups: local targets, dynamic targets, and non-rooting targets.
+
+[^1]: While a mutable reference to a `(Local)ReusableSlot` roots the data, it assigns the scope's lifetime to the result which allows the result to live until we leave the scope. This slot can be reused, though, so the data is not guaranteed to remain rooted for the entire `'target` lifetime. For this reason an unrooted reference is returned.
+
+
+# Local targets
+
+The frame we've use so far is a `LocalGcFrame`. It's called local because all roots are stored locally on the stack, which is why we need to know its size at compile time.
+
+Every time we root data by using a mutable reference to a `LocalGcFrame` we consume one of its slots. It's also possible to reserve a slot as a `LocalOutput` or `LocalReusableSlot`, they can be created by calling `LocalGcFrame::local_output` and `LocalGcFrame::local_reusable_slot`. These methods consume a slot. The main difference between the two is that `LocalReusableSlot` is a bit more permissive with the lifetime of the result at the cost of returning an unrooted reference. They're useful if we need to return multiple instances of managed data from a scope, or want to reuse a slot inside one.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn add<'target, Tgt>(target: Tgt, a: u8, b: u8) -> ValueResult<'target, 'static, Tgt>
+where
+    Tgt: Target<'target>,
+{
+    target.with_local_scope::<_, _, 3>(|target, mut frame| {
+        let a = Value::new(&mut frame, a);
+        let b = Value::new(&mut frame, b);
+        let func = Module::base(&frame)
+            .global(&mut frame, "+")
+            .expect("+ not found in Base");
+
+        // Safety: calling + is safe
+        unsafe { func.call2(target, a, b) }
+    })
+}
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 2>(|mut frame| {
+        let mut output = frame.local_output();
+        let mut reusable_slot = frame.local_reusable_slot();
+
+        {
+            // This result can be used until the next time `(&mut) output` is used
+            let result = add(&mut output, 1, 2).expect("could not add numbers");
+            let unboxed = result.unbox::<u8>().expect("cannot unbox as u8");
+            assert_eq!(unboxed, 3);
+        }
+
+        {
+            // This result can be used until the scope ends
+            let result = add(output, 1, 2).expect("could not add numbers");
+            let unboxed = result.unbox::<u8>().expect("cannot unbox as u8");
+            assert_eq!(unboxed, 3);
+        }
+
+        {
+            // This result can be used until the scope ends, but must not be used after
+            // `reusable_slot` has been used again. Because the result can live longer
+            // than it might be rooted, it's returned as a `ValueRef`.
+            let result = add(&mut reusable_slot, 1, 2).expect("could not add numbers");
+
+            // Safety: result is rooted until we use `reusable_slot` again
+            let unboxed = unsafe { result.as_value() }.unbox::<u8>().expect("cannot unbox as u8");
+            assert_eq!(unboxed, 3);
+        }
+
+        {
+            // This result can be used until the scope ends
+            let result = add(reusable_slot, 1, 2).expect("could not add numbers");
+            let unboxed = result.unbox::<u8>().expect("cannot unbox as u8");
+            assert_eq!(unboxed, 3);
+        }
+    });
+}
+```
+
+An `UnsizedLocalGcFrame` is similar to a `LocalGcFrame`, the major difference is that its size isn't required to be known at runtime. If the size of the frame is statically known, use `LocalGcFrame`.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn add<'target, Tgt>(target: Tgt, a: u8, b: u8) -> ValueResult<'target, 'static, Tgt>
+where
+    Tgt: Target<'target>,
+{
+    target.with_local_scope::<_, _, 3>(|target, mut frame| {
+        let a = Value::new(&mut frame, a);
+        let b = Value::new(&mut frame, b);
+        let func = Module::base(&frame)
+            .global(&mut frame, "+")
+            .expect("+ not found in Base");
+
+        // Safety: calling + is safe
+        unsafe { func.call2(target, a, b) }
+    })
+}
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.unsized_local_scope(2, |mut frame| {
+        let mut output = frame.local_output();
+        let mut reusable_slot = frame.local_reusable_slot();
+
+        {
+            let result = add(&mut output, 1, 2).expect("could not add numbers");
+            let unboxed = result.unbox::<u8>().expect("cannot unbox as u8");
+            assert_eq!(unboxed, 3);
+        }
+
+        {
+            let result = add(output, 1, 2).expect("could not add numbers");
+            let unboxed = result.unbox::<u8>().expect("cannot unbox as u8");
+            assert_eq!(unboxed, 3);
+        }
+
+        {
+            let result = add(&mut reusable_slot, 1, 2).expect("could not add numbers");
+
+            // Safety: result is rooted until we use `reusable_slot` again
+            let unboxed = unsafe { result.as_value() }.unbox::<u8>().expect("cannot unbox as u8");
+            assert_eq!(unboxed, 3);
+        }
+
+        {
+            let result = add(reusable_slot, 1, 2).expect("could not add numbers");
+            let unboxed = result.unbox::<u8>().expect("cannot unbox as u8");
+            assert_eq!(unboxed, 3);
+        }
+    })
+}
+```
+
+
+# Dynamic targets
+
+A `GcFrame` is a dynamically-sized alternative for `LocalGcFrame`. With a `GcFrame` we avoid having to count how many slots we'll need.
+
+We'll first need to set up a dynamic stack. This is a matter of calling `WithStack::with_stack`, the `WithStack` trait is implemented for `LocalHandle`. Like `LocalGcFrame`, there are two secondary targets which reserve a slot, `Output` and `ReusableSlot`. They behave exactly the same as their local counterparts do.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn add<'target, Tgt>(target: Tgt, a: u8, b: u8) -> ValueResult<'target, 'static, Tgt>
+where
+    Tgt: Target<'target>,
+{
+    target.with_local_scope::<_, _, 3>(|target, mut frame| {
+        let a = Value::new(&mut frame, a);
+        let b = Value::new(&mut frame, b);
+        let func = Module::base(&frame)
+            .global(&mut frame, "+")
+            .expect("+ not found in Base");
+
+        // Safety: calling + is safe
+        unsafe { func.call2(target, a, b) }
+    })
+}
+
+fn main() {
+    let mut handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.with_stack(|mut stack| {
+        stack.scope(|mut frame| {
+            let mut output = frame.output();
+            let mut reusable_slot = frame.reusable_slot();
+
+            {
+                // This result can be used until the next time `(&mut) output` is used
+                let result = add(&mut output, 1, 2).expect("could not add numbers");
+                let unboxed = result.unbox::<u8>().expect("cannot unbox as u8");
+                assert_eq!(unboxed, 3);
+            }
+
+            {
+                // This result can be used until the scope ends
+                let result = add(output, 1, 2).expect("could not add numbers");
+                let unboxed = result.unbox::<u8>().expect("cannot unbox as u8");
+                assert_eq!(unboxed, 3);
+            }
+
+            {
+                // This result can be used until the scope ends, but must not be used after
+                // `reusable_slot` has been used again. Because the result can live longer
+                // than it might be rooted, it's returned as a `ValueRef`.
+                let result = add(&mut reusable_slot, 1, 2).expect("could not add numbers");
+
+                // Safety: result is rooted until we use reusable_slot again
+                let unboxed = unsafe { result.as_value() }.unbox::<u8>().expect("cannot unbox as u8");
+                assert_eq!(unboxed, 3);
+            }
+
+            {
+                // This result can be used until the scope ends
+                let result = add(reusable_slot, 1, 2).expect("could not add numbers");
+                let unboxed = result.unbox::<u8>().expect("cannot unbox as u8");
+                assert_eq!(unboxed, 3);
+            }
+        })
+    })
+}
+```
+
+While a dynamic scope can be nested like a local scope can, this can only be done by calling `GcFrame::scope`. Due to requiring a stack, it's not possible to let an arbitrary target create a new dynamic scope.[^1] Allocating and resizing this stack is relatively expensive, and threading it through our application can be complicated, so it's best to stick with local scopes.
+
+There's one more dynamic target: `AsyncGcFrame`. It's a `GcFrame` with some additional async capabilities, we'll take a closer look when the async runtime is introduced.
+
+[^1]: Technically it's possible by creating a weak handle, but this is discouraged because setting up the dynamic stack is relatively expensive.
+
+
+# Non-rooting targets
+
+We don't always need to root managed data. If we never use the result of a function, or if we can guarantee it's globally rooted, it's perfectly fine to leave it unrooted. Keeping unnecessary data alive only leads to additional GC overhead. In this case we want to use a non-rooting target.
+
+Any target can be used as a non-rooting target by using it behind an immutable reference. There is also `Unrooted`, which can be created by calling `Target::unrooted` or `Managed::unrooted_target`. It's useful if it's not possible to use a reference to an existing target. When an unrooted target is created with the first method, it inherits the `'target` lifetime of the target, with the second it inherits the managed data's `'scope` lifetime.
+
+There are several other non-rooting targets mentioned in the table, which are all handle types, most of which we haven't seen yet. They're relatively unimportant, they're treated as targets because they can only exist when it's safe to call into Julia, introduce a useful `'target` lifetime, and targets can create new scopes.
+
+
+# Types and layouts
+
+We've already seen a few different types in action, but we haven't really covered Julia's type system at all.
+
+Every `Value` has a type, or `DataType`, which we can access at runtime.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 1>(|mut frame| {
+        let v = Value::new(&mut frame, 1.0f32);
+        let dt = v.datatype();
+        println!("{:?}", dt);
+    })
+}
+```
+
+This example prints `Float32`, the `DataType` of a 32-bits floating point number in Julia. Internally, a `Value` is a pointer to some memory managed by Julia, and its `DataType` determines the layout of the memory it's pointing to.
+
+There are three important traits that deal with this layout and type information: `ValidLayout`, `ValidField`, and `ConstructType`. They're all derivable traits, and should never be implemented manually. We'll cover the derivable traits and other code generation capabilities of jlrs later, for now it's only important to understand what these three traits encode.
+
+`ValidLayout` can be implemented by types that represent the layout of a `DataType`. It's used to check that the layout in Rust and Julia match when converting them between languages at runtime. `ValidField` is similar, but is concerned with the layout of fields rather than the layout of types. The distinction is relevant because the layout of the type might not match the layout of the field with that type. Finally, `ConstructType` is used to construct Julia type objects from Rust types. The distinction is once again relevant because not all types have a layout, a layout doesn't necessarily map to a single type object, and sometimes we'll need to express a type that's more exotic than can be expressed with a layout.
+
+Before we start to tackle Julia arrays where we'll see all these traits in action, we're going to look at how Julia data is laid out in memory first. The next sections are not intended as a guide how to match the layout of types in Rust and Julia, we normally never implement these representations manually, but it's useful to have a basic understanding of this topic.
+
+
+# `isbits` layouts
+
+The layout of a primitive type in Julia usually matches its analog in Rust: if the `DataType` is `Int8`, a `Value` of this type is a pointer to an `i8`; if it's `Float32` the `Value` is a pointer to an `f32`. There are two exceptions: `Bool` and `Char` map to types of the same name defined in jlrs, not `bool` and `char`.
+
+Composite types are a bit more involved. `isbits` types are immutable types made up of primitive types and other `isbits` types. Their layout maps to the obvious `repr(C)` representation in Rust. For example, the following Rust and Julia types have the same layout in memory
+
+```julia
+struct InnerBits
+    a::Int8
+end
+
+struct OuterBits
+    inner::InnerBits
+    b::UInt8
+end
+```
+
+```rust,ignore
+#[repr(C)]
+struct InnerBits {
+    a: i8
+}
+
+#[repr(C)]
+struct OuterBits {
+    inner: InnerBits,
+    b: u8,
+}
+```
+
+Because `InnerBits` and `OuterBits` in Rust faithfully represent the layout of their corresponding type in Julia they can implement `ValidLayout`. They can implement `ValidField` because they're inlined into the composite when used as a field type. The layouts correspond to a single type in Julia, so these types can implement `ConstructType` to map the Rust type to their Julia counterpart.
+
+
+# Inline and non-inline layouts
+
+In the previous section we saw that fields with an `isbits` type are inlined in a composite type. A field whose type is mutable won't be inlined.
+
+```julia
+mutable struct Inner
+    a::Int8
+end
+
+struct Outer
+    inner::Inner
+    b::UInt8
+end
+```
+
+```rust,ignore
+#[repr(C)]
+struct Inner {
+    a: i8
+}
+
+#[repr(C)]
+struct Outer<'scope, 'data> {
+    inner: Option<ValueRef<'scope, 'data>>,
+    b: u8,
+}
+```
+
+An unrooted reference is used instead of a managed type to represent non-inlined fields to account for mutability, which can render the field's old value unreachable. Managed types and unrooted references make use of the `Option<NonNull>` niche optimization to guarantee `Option<ValueRef>` has the same size as a pointer.[^1] We'll say that instances of `Outer` reference managed data.
+
+Because mutable types aren't inlined, `Inner` can only implement `ValidLayout`, not `ValidField`. Immutable types are normally inlined, so `Outer` can implement both traits. The layouts identify single types, so both types can implement `ConstructType`.
+
+[^1]: Null data is rare in Julia and generally invalid to use.
+
+
+# Union fields
+
+The representation of a field with a `Union` type depends on the union's variants. If all variants are `isbits` types an optimization applies and the field is inlined, otherwise the field is represented as `Option<ValueRef>`. We'll see later that a similar optimization applies to arrays.
+
+The presence of a union field doesn't affect whether the layout type can implement `ValidLayout`, `ValidField`, and `ConstructType`.
+
+It's not particularly important to know how an inlined union can be represented in Rust, so no example will be provided.
+
+
+# Generics
+
+Types in Julia can have parameters, which may or may not affect the layout of the type.
+
+There are two reasons why a type parameter might not affect the layout:
+
+1. it's a value parameter, not referenced by any of the fields.
+2. it affects the layout of a field that isn't inlined.
+
+Any type parameter that doesn't affect the layout can be elided, otherwise it can be treated the same way in Rust and Julia:
+
+```julia
+struct Generic{T}
+    t::T
+end
+
+struct SetGeneric
+    t::Generic{UInt32}
+end
+
+struct Elided{T}
+    t::UInt32
+end
+```
+
+```rust,ignore
+#[repr(C)]
+struct Generic<T> {
+    t: T,
+}
+
+#[repr(C)]
+struct SetGeneric {
+    t: Generic<u32>,
+}
+
+#[repr(C)]
+struct Elided {
+    t: u32,
+}
+```
+
+All three types can implement `ValidLayout` and `ValidField` because they're immutable types in Julia. In the case of `Generic` it's required that `T: ValidField`. If `T` is some mutable or otherwise non-inlined type, we can express the layout type as `Generic<Option<ValueRef>>`.
+
+`Generic` and `SetGeneric` don't elide any type parameters so they can implement `ConstructType`, but `Elided` is unaware of the type paramater `T`.
+
+
+# Arrays
+
+So far we've only worked with relatively simple types, now it's time to look at the `Array` type. The first thing that makes this type more complex are its type parameters, the element type `T` and rank `N`, which have special handling compared to other type parameters in jlrs.
+
+This special handling involves a single base type, `ArrayBase<T, const N: isize>`, and aliases for the four possible cases:
+
+ - `Array == ArrayBase<Unknown, -1>`
+ - `TypedArray<T> == ArrayBase<T, -1>`
+ - `RankedArray<const N: isize> == ArrayBase<Unknown, N>`
+ - `TypedRankedArray<T, const N: isize> == ArrayBase<T, N>`
+
+As can be seen in this list it's possible to ignore the element type and rank of an array. A known element type must implement `ConstructType`, a known rank is greater than or equal to 0.
+
+There are a few additional specialized type aliases:
+
+ - `Vector == RankedArray<1>`
+ - `TypedVector<T> == TypedRankedArray<T, 1>`
+ - `VectorAny == TypedVector<Any>`
+ - `Matrix == RankedArray<2>`
+ - `TypedMatrix<T> == TypedRankedArray<T, 2>`
+
+The elements of Julia arrays are stored in column-major order, which is also known as "F" or "Fortran" order. The sequence `1, 2, 3, 4, 5, 6` maps to the following 2 x 3 matrix:
+
+```text
+1  3  5
+2  4  6
+```
+
+i.e.
+
+```julia
+[1 3 5; 2 4 6]
+```
+
+
+# Creating arrays
+
+Functions that create new arrays can mostly be divided into two classes: `Typed(Ranked)Array` provides functions like `new` which use the given `T` to construct the element type, while `(Ranked)Array` provides similar functions postfixed with `_for`, e.g. `new_for`, which take the element type as an argument instead.
+
+In addition to the element type, these functions take the desired dimensions of the array as an argument. Up to rank 4, tuples of `usize` can be used to express these dimensions. It's also possible to use `[usize; N]`, `&[usize; N]`, and `&[usize]`. If the rank of the array and the dimensions are known at compile time and they don't match, the code will fail to compile.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 2>(|mut frame| {
+        let arr1 = TypedArray::<f32>::new(&mut frame, (2, 2))
+            .expect("invalid size");
+        assert_eq!(arr1.rank(), 2);
+
+        let f32_ty = DataType::float32_type(&frame).as_value();
+        let arr2 = RankedArray::<2>::new_for(&mut frame, f32_ty, [2, 2])
+            .expect("invalid size");
+
+        assert_eq!(arr1.element_type(), arr2.element_type());
+    })
+}
+```
+
+The `new(_for)` functions return an array whose elements haven't been initialized.[^1] It's also possible to wrap an existing `Vec` or slice with `from_vec(_for)` and `from_slice(_for)`. These functions require that the elements are laid out correctly for an array whose element type is `T`. If the layout of the elements is `U`, this layout must be correct for `T`. This connection is expressed with the `HasLayout` trait, which connects a type constructor with its layout type. They're the same type as long as no type parameters have been elided.
+
+The `from_vec(_for)` functions take ownership of a `Vec`, which is dropped when the array is freed by the GC. The `from_slice(_for)` functions borrow their data from Rust instead. `Value` and `Array` have a second lifetime called `'data`. This lifetime is set to the lifetime of the borrow to prevent this array from being accessed after the borrow ends. Be aware that Julia is unaware of this lifetime, so there's nothing that prevents us from keeping the array alive by assigning it to a global variable or sending it to some background thread. It's your responsibility to guarantee this doesn't happen, which is one of the reasons why the methods to call Julia functions are unsafe.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 2>(|mut frame| {
+        let data = vec![1.0f64, 2., 3., 4.];
+        let arr = TypedArray::<f64>::from_vec(&mut frame, data, (2, 2))
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+        assert_eq!(arr.rank(), 2);
+
+        let data = vec![1.0f64, 2., 3., 4.];
+        let f64_ty = DataType::float64_type(&frame).as_value();
+        let arr2 = RankedArray::<2>::from_vec_for(&mut frame, f64_ty, data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        assert_eq!(arr.element_type(), arr2.element_type());
+    });
+
+    handle.local_scope::<_, 2>(|mut frame| {
+        let mut data = vec![1.0f64, 2., 3., 4.];
+        let arr = TypedArray::<f64>::from_slice(&mut frame, &mut data, (2, 2))
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+        assert_eq!(arr.rank(), 2);
+
+        let mut data = vec![1.0f64, 2., 3., 4.];
+        let f64_ty = DataType::float64_type(&frame).as_value();
+        let arr2 = RankedArray::<2>::from_slice_for(&mut frame, f64_ty, &mut data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        assert_eq!(arr.element_type(), arr2.element_type());
+    })
+}
+```
+
+The functions `from_slice_cloned(_for)` and `from_slice_copied(_for)` use `new(_for)` to allocate the array, then clone or copy the elements from a given slice to this array. These functions avoid the finalizer of `from_vec(_for)` and the lifetime limitations of `from_slice(_for)`, at the cost of cloning or copying the elements.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 2>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let arr = TypedArray::<f64>::from_slice_cloned(&mut frame, &data, (2, 2))
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+        assert_eq!(arr.rank(), 2);
+
+        let f64_ty = DataType::float64_type(&frame).as_value();
+        let arr2 = RankedArray::<2>::from_slice_cloned_for(&mut frame, f64_ty, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        assert_eq!(arr.element_type(), arr2.element_type());
+    });
+
+    handle.local_scope::<_, 2>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let arr = TypedArray::<f64>::from_slice_copied(&mut frame, &data, (2, 2))
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+        assert_eq!(arr.rank(), 2);
+
+        let f64_ty = DataType::float64_type(&frame).as_value();
+        let arr2 = RankedArray::<2>::from_slice_copied_for(&mut frame, f64_ty, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        assert_eq!(arr.element_type(), arr2.element_type());
+    });
+}
+```
+
+Finally, there are two specialized functions. `TypedVector::<Any>::new_any` allocates a vector that can hold elements of any type. `TypedVector::<u8>::from_bytes` can convert anything that can be referenced as a slice of bytes to a `TypedVector<u8>`, it's similar to `TypedVector::<u8>::from_slice_copied`.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 1>(|mut frame| {
+        let arr = VectorAny::new_any(&mut frame, 3).expect("invalid size");
+        assert_eq!(arr.rank(), 1);
+    });
+
+    handle.local_scope::<_, 2>(|mut frame| {
+        let data = [1u8, 2, 3, 4];
+        let arr = TypedVector::<u8>::from_bytes(&mut frame, &data).expect("invalid size");
+        assert_eq!(arr.rank(), 1);
+
+        let data = "also bytes";
+        let arr = TypedVector::<u8>::from_bytes(&mut frame, &data).expect("invalid size");
+        assert_eq!(arr.rank(), 1);
+    });
+}
+```
+
+[^1]: If the elements reference other managed data, the array storage will be initialized to 0.
+
+
+# Accessing arrays
+
+The different array types don't provide direct access to their data, we'll need to create an accessor first. There are multiple accessor types, and the one that must be used depends on the layout of the elements.
+
+A quick note on safety: never access an array that's already accessed mutably, either in Rust or Julia code.
+
+It's possible to completely ignore the layout of the elements with an `IndeterminateAccessor`. It can be created with the `ArrayBase::indeterminate_data` method. It implements the `Accessor` trait which provides a `get_value` method which returns the element as a `Value`. Unlike Julia, array indexing starts at 0.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 2>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let f64_ty = DataType::float64_type(&frame).as_value();
+        let arr = RankedArray::<2>::from_slice_copied_for(&mut frame, f64_ty, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        // Safety: we never mutably access this data.
+        let accessor = unsafe { arr.indeterminate_data() };
+
+        let a21 = accessor
+            .get_value(&mut frame, [1, 0])
+            .expect("out of bounds")
+            .expect("undefined reference")
+            .unbox::<f64>()
+            .expect("wrong type");
+
+        assert_eq!(a21, 2.);
+    });
+}
+```
+
+We've seen in the previous chapter that there are three ways a field of a composite type can be stored: it can be stored inline, as a reference to managed data, or as an inlined union. An array element is stored as if it were a field of a composite type with one minor exception, there's a difference between how inlined unions are stored in composite types and arrays.[^1]
+
+There's a separate accessor for each of these layouts: `InlineAccessor`, `ValueAccessor`, and `BitsUnionAccessor`. There are two additional accessors, `BitsAccessor` and `ManagedAccessor`. The first can be used with layouts that implement the `IsBits` trait and the latter with arbitrary managed types like `Module` and `DataType`.
+
+If a `Typed(Ranked)Array` is used the correct accessor might be inferred from that type's `T` parameter. Some of these methods will be available in that case: `inline_data`, `value_data`, `union_data`, `bits_data`, and `managed_data`. Methods prefixed with `try_`, e.g. `try_bits_data`, are generally available for all array types. These methods check if the correct accessor has been requested at runtime. Methods like `ArrayBase::has_bits_layout` can be used to check if an accessor is compatible with the layout of the elements.
+
+All these accessor types implement `Accessor`, and additionally provide a `get` function to access an element at some index. Excluding the `BitsUnionAccessor`, they also implement `Index`. These implementations accept the same multidimensional indices as the functions that create new arrays do. The `as_slice` and `into_slice` methods provided by the indexable types let us ignore the multidimensionality and access the data as a slice in column-major order.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    // BitsAccessor
+    handle.local_scope::<_, 1>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let arr = TypedArray::<f64>::from_slice_copied(&mut frame, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        // Safety: we never mutably access this data.
+        let accessor = unsafe { arr.bits_data() };
+
+        let a11 = accessor[[0, 0]];
+        assert_eq!(a11, 1.);
+
+        let a21 = accessor[[1, 0]];
+        assert_eq!(a21, 2.);
+
+        let a12 = accessor[[0, 1]];
+        assert_eq!(a12, 3.);
+
+        let a22 = accessor[[1, 1]];
+        assert_eq!(a22, 4.);
+    });
+
+    // InlineAccessor
+    handle.local_scope::<_, 1>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let arr = TypedArray::<f64>::from_slice_copied(&mut frame, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        // Safety: we never mutably access this data.
+        let accessor = unsafe { arr.inline_data() };
+
+        let elem = accessor[[1, 0]];
+        assert_eq!(elem, 2.);
+    });
+
+    // ValueAccessor
+    handle.local_scope::<_, 2>(|mut frame| {
+        // Safety: this code only allocates and returns an array
+        let arr = unsafe { Value::eval_string(&mut frame, "Any[:foo, :bar]") }
+            .expect("caught an exception")
+            .cast::<VectorAny>()
+            .expect("not a VectorAny");
+
+        // Safety: we never mutably access this data.
+        let accessor = unsafe { arr.value_data() };
+
+        let elem = accessor.get_value(&mut frame, 0)
+            .expect("out of bounds")
+            .expect("undefined reference");
+        let sym = Symbol::new(&frame, "foo");
+        assert_eq!(elem, sym);
+    });
+
+    // ManagedAccessor
+    handle.local_scope::<_, 2>(|mut frame| {
+        // Safety: this code only allocates and returns an array
+        let arr = unsafe { Value::eval_string(&mut frame, "Symbol[:foo, :bar]") }
+            .expect("caught an exception")
+            .cast::<TypedVector<Symbol>>()
+            .expect("not a TypedVector<Symbol>");
+
+        // Safety: we never mutably access this data.
+        let accessor = unsafe { arr.managed_data() };
+
+        let elem = accessor.get(&mut frame, 0).expect("undefined reference or out of bounds");
+        let sym = Symbol::new(&frame, "foo");
+        assert_eq!(elem, sym);
+    });
+
+    // BitsUnionAccessor
+    handle.local_scope::<_, 1>(|mut frame| {
+        // Safety: this code only allocates and returns an array
+        let arr = unsafe { Value::eval_string(&mut frame, "Union{Int, Float64}[1.0 2; 3 4.0]") }
+            .expect("caught an exception")
+            .cast::<Matrix>()
+            .expect("not a Matrix");
+
+        // Safety: we never mutably access this data.
+        let accessor = unsafe { arr.try_union_data().expect("wrong accessor") };
+
+        let elem = accessor.get::<isize, _>([1, 0]).expect("wrong layout").expect("out of bounds");
+        assert_eq!(elem, 3);
+    });
+}
+```
+
+[^1]: In composite types, the data and the tag that identifies its type are stored adjacently, in an array the flags are collectively stored after the data.
+
+
+# Mutating arrays
+
+In addition to the immutable accessors we've seen in the previous section, jlrs also provides mutable accessors.
+
+Methods like `(try_)bits_data_mut` and types like `BitsAccessorMut` exist analogously to the immutable variants. The methods provided by the mutable accessors have names similar to their immutable counterparts. Some accessors don't provide direct mutable access to an element; they don't implement `IndexMut` or provide a `set_mut` method. In this case we'll need to use `AccessorMut::set_value`.
+
+Mutating managed data from Rust is generally unsafe in jlrs. The reason essentially boils down to "just because you have access to a mutable value doesn't mean you're allowed to mutate it." Strings are a good example, they're mutable but it's UB to mutate them. Array accessors are a bit special in this regard: it's unsafe to create a mutable accessor, but many of their mutating methods are safe. The safety-requirements are implied by the requirements of creating a mutable accessor in the first place.
+
+The array types implement `Copy` so it's trivial to create two mutable accessors to the same array, or multiple mutable and immutable accessor in general. It's your responsibility to ensure this doesn't happen. It's possible to avoid this issue to a degree by tracking the array, which we'll cover later in this chapter.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    // IndeterminateAccessorMut
+    handle.local_scope::<_, 4>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let f64_ty = DataType::float64_type(&frame).as_value();
+        let mut arr = RankedArray::<2>::from_slice_copied_for(&mut frame, f64_ty, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        // Safety: this is the only accessor to this data.
+        let mut accessor = unsafe { arr.indeterminate_data_mut() };
+
+        let v = Value::new(&mut frame, 5.0f64);
+        accessor.set_value(&mut frame, [1, 0], v).expect("index out of bounds").expect("caught exception");
+
+        let elem = accessor
+            .get_value(&mut frame, [1, 0])
+            .expect("out of bounds")
+            .expect("undefined reference")
+            .unbox::<f64>()
+            .expect("wrong type");
+        assert_eq!(elem, 5.);
+    });
+
+    // BitsAccessorMut
+    handle.local_scope::<_, 1>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let mut arr = TypedArray::<f64>::from_slice_copied(&mut frame, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        // Safety: this is the only accessor to this data.
+        let mut accessor = unsafe { arr.bits_data_mut() };
+
+        let elem = accessor[[1, 0]];
+        assert_eq!(elem, 2.);
+
+        accessor[[1, 0]] = 4.;
+        let elem = accessor[[1, 0]];
+        assert_eq!(elem, 4.);
+    });
+
+    // InlineAccessorMut
+    handle.local_scope::<_, 2>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let mut arr = TypedArray::<f64>::from_slice_copied(&mut frame, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        // Safety: this is the only accessor to this data.
+        let mut accessor = unsafe { arr.inline_data_mut() };
+
+        let elem = accessor[[1, 0]];
+        assert_eq!(elem, 2.);
+
+        let v = Value::new(&mut frame, 4.0f64);
+        accessor
+            .set_value(&mut frame, [1, 0], v)
+            .expect("index out of bounds")
+            .expect("caught an exception");
+
+        let elem = accessor[[1, 0]];
+        assert_eq!(elem, 4.);
+    });
+
+    // ValueAccessorMut
+    handle.local_scope::<_, 3>(|mut frame| {
+        // Safety: this code only allocates and returns an array
+        let mut arr = unsafe { Value::eval_string(&mut frame, "Any[:foo, :bar]") }
+            .expect("caught an exception")
+            .cast::<VectorAny>()
+            .expect("not a VectorAny");
+
+        // Safety: this is the only accessor to this data.
+        let mut accessor = unsafe { arr.value_data_mut() };
+
+        let v = Value::new(&mut frame, 1usize);
+        accessor
+            .set_value(&mut frame, 0, v)
+            .expect("out of bounds")
+            .expect("caught an exception");
+
+        let elem = accessor.get(&mut frame, 0).expect("out of bounds");
+        assert_eq!(v, elem);
+    });
+
+    // ManagedAccessorMut
+    handle.local_scope::<_, 4>(|mut frame| {
+        // Safety: this code only allocates and returns an array
+        let mut arr = unsafe { Value::eval_string(&mut frame, "Symbol[:foo, :bar]") }
+            .expect("caught an exception")
+            .cast::<TypedVector<Symbol>>()
+            .expect("not a TypedVector<Symbol>");
+
+        // Safety: this is the only accessor to this data.
+        let mut accessor = unsafe { arr.managed_data_mut() };
+
+        let sym = Symbol::new(&mut frame, "baz");
+        accessor
+            .set_value(&mut frame, 0, sym.as_value())
+            .expect("out of bounds")
+            .expect("caught an exception");
+
+        let elem = accessor.get(&mut frame, 0).expect("out of bounds");
+        assert_eq!(sym, elem);
+    });
+
+    // BitsUnionAccessorMut
+    handle.local_scope::<_, 1>(|mut frame| {
+        // Safety: this code only allocates and returns an array
+        let mut arr =
+            unsafe { Value::eval_string(&mut frame, "Union{Int, Float64}[1.0 2; 3 4.0]") }
+                .expect("caught an exception")
+                .cast::<Matrix>()
+                .expect("not a Matrix");
+
+        // Safety: this is the only accessor to this data.
+        let mut accessor = unsafe { arr.try_union_data_mut().expect("wrong accessor") };
+
+        accessor
+            .set([1, 0], DataType::float64_type(&frame), 4.0f64)
+            .expect("out of bounds or incompatible type")
+            .expect("caught an exception");
+
+        let elem = accessor
+            .get::<f64, _>([1, 0])
+            .expect("wrong layout")
+            .expect("out of bounds");
+        assert_eq!(elem, 4.0);
+    });
+}
+```
+
+
+# ndarray
+
+`BitsAccessor`, `InlineAccessor`, and `BitsAccessorMut` are compatible with ndarray via the `NdArrayView` and `NdArrayViewMut` traits. This requires enabling jlrs's `jlrs-ndarray` feature.
+
+```rust,ignore
+use jlrs::{
+    convert::ndarray::{NdArrayView, NdArrayViewMut},
+    prelude::*,
+};
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    // BitsAccessor as ArrayView
+    handle.local_scope::<_, 1>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let arr = TypedArray::<f64>::from_slice_copied(&mut frame, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        // Safety: we never mutably access this data.
+        let accessor = unsafe { arr.bits_data() };
+        let view = accessor.array_view();
+
+        let a21 = view[[1, 0]];
+        assert_eq!(a21, 2.);
+    });
+
+    // InlineAccessor as ArrayView
+    handle.local_scope::<_, 1>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let arr = TypedArray::<f64>::from_slice_copied(&mut frame, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        // Safety: we never mutably access this data.
+        let accessor = unsafe { arr.inline_data() };
+        let view = accessor.array_view();
+
+        let elem = view[[1, 0]];
+        assert_eq!(elem, 2.);
+    });
+
+    // BitsAccessorMut as ArrayViewMut
+    handle.local_scope::<_, 1>(|mut frame| {
+        let data = [1., 2., 3., 4.];
+        let mut arr = TypedArray::<f64>::from_slice_copied(&mut frame, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        // Safety: this is the only accessor to this data.
+        let mut accessor = unsafe { arr.bits_data_mut() };
+        let mut view = accessor.array_view_mut();
+
+        let elem = view[[1, 0]];
+        assert_eq!(elem, 2.);
+
+        view[[1, 0]] = 4.;
+        let elem = view[[1, 0]];
+        assert_eq!(elem, 4.);
+    });
+}
+```
+
+
+# Tracking arrays
+
+It's trivial to create multiple mutable accessors to the same array. A band-aid is available: jlrs can track managed data to prevent mutable aliasing in Rust code to a degree. An array can be tracked exclusively or shared with the `track_exclusive` and `track_shared` methods available to all array types. `track_shared` succeeds as long as the array isn't already tracked exclusively, `track_exclusive` enforces exclusive access.
+
+Overall, tracking can make accessing arrays safer as long as it's used consistently, but it's unaware of accesses in Julia code.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    // Shared tracking
+    handle.local_scope::<_, 1>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let arr = TypedArray::<f64>::from_slice_copied(&mut frame, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        let tracked = arr.track_shared().expect("already tracked exclusively");
+        assert!(arr.track_exclusive().is_err());
+        assert!(arr.track_shared().is_ok());
+
+        let accessor = tracked.bits_data();
+
+        let elem = accessor[[1, 0]];
+        assert_eq!(elem, 2.);
+    });
+
+    // Exclusive tracking
+    handle.local_scope::<_, 1>(|mut frame| {
+        let data = [1.0f64, 2., 3., 4.];
+        let arr = TypedArray::<f64>::from_slice_copied(&mut frame, &data, [2, 2])
+            .expect("incompatible type and layout")
+            .expect("invalid size");
+
+        let tracked = arr.track_exclusive().expect("already tracked exclusively");
+        assert!(arr.track_exclusive().is_err());
+        assert!(arr.track_shared().is_err());
+
+        let accessor = tracked.bits_data();
+
+        let elem = accessor[[1, 0]];
+        assert_eq!(elem, 2.);
+    });
+}
+```
+
+
+# Exception handling
+
+Many functions in Julia can throw exceptions, including low-level functions exposed by jlrs. Examples include calling a Julia function with incorrect arguments and trying to allocate a ridiculously-sized array. These functions are typically exposed twice: as a function that catches exceptions, and one that doesn't.
+
+The function that doesn't catch the exception is always unsafe. Julia exceptions are implemented with `longjmp`, when an exception is thrown control flow jumps to the nearest enclosing catch block, so we must guarantee we don't jump over any pending drops. We can call arbitrary functions in a try-block with a custom exception handler with the `catch_exceptions` function, but this remains unsafe because we still have to guarantee we don't jump over any drops. It's fine to jump out of some deeply nested scope as long as any frame that is jumped over is a ["Plain Old Frame"].
+
+If an exception is thrown and there is no handler available, Julia aborts the process.
+
+```rust,ignore
+use jlrs::{catch::catch_exceptions, prelude::*};
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    // Safety: we don't jump over any pending drops if an exception is thrown.
+    handle.local_scope::<_, 1>(|mut frame| unsafe {
+        catch_exceptions(
+            || {
+                TypedArray::<u8>::new_unchecked(&mut frame, (usize::MAX, usize::MAX));
+            },
+            |e| {
+                println!("caught exception: {e:?}")
+            },
+        ).expect_err("allocated ridiculously-sized array successfully");
+    });
+}
+```
+
+This example should print `caught exception: ArgumentError("invalid Array dimensions")`.
+
+["Plain Old Frame"]: https://github.com/rust-lang/rfcs/blob/master/text/2945-c-unwind-abi.md#plain-old-frames
+
+
+# Parachutes
+
+If we can't avoid data that must be dropped, it might be possible to attach a parachute to this data to ensure it's dropped safely even if an exception is thrown. When we attach a parachute to data, we move it from Rust to Julia by converting it to managed data, which makes the GC responsible for dropping it.
+
+A parachute can be attached by calling `AttachParachute::attach_parachute`, this trait is implemented for any type that is `Sized + Send + Sync + 'static`. The resulting `WithParachute` derefences to the original type, the parachute can be removed by calling `WithParachute::remove_parachute`.
+
+```rust,ignore
+use jlrs::{catch::catch_exceptions, data::managed::parachute::AttachParachute, prelude::*};
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 2>(|mut frame| {
+        // Safety: this is a POF. We attach a parachute to vec
+        // to make the GC responsible for dropping it.
+        unsafe {
+            catch_exceptions(
+                || {
+                    let dims = (usize::MAX, usize::MAX);
+                    let vec = vec![1usize];
+                    let mut with_parachute = vec.attach_parachute(&mut frame);
+                    let arr = TypedArray::<u8>::new_unchecked(&mut frame, dims);
+                    with_parachute.push(2);
+                    arr
+                },
+                |e| println!("caught exception: {e:?}"),
+            )
+        }
+        .expect_err("allocated ridiculously-sized array successfully");
+    });
+}
+```
+
+We've attached a parachute to `vec` so it's fine that the next line throws an exception. The GC will eventually take care of dropping it for us.
+
+
+# Bindings and derivable traits
+
+We've encountered several traits that shouldn't be implemented manually, but derived. These traits express connections between types in Rust and Julia and their properties.
+
+The following traits can currently be derived:
+
+- `ValidLayout`
+  Expresses that the implementor represents the layout of one or more Julia types, i.e. it's a layout type.
+
+- `ValidField`
+  Expresses that the implementor represents the layout of one or more Julia types when used as a field of another type.
+
+- `IsBits`
+  Expresses that the implementor is the layout of an `isbits` type.
+
+- `Typecheck`
+  Lets the implementor be used with `DataType::is` and `Value::is`, the implementation calls `ValidLayout::valid_layout`.
+
+- `IntoJulia`
+  Lets the implementor be converted to managed data with `Value::new`.
+
+- `Unbox`
+  Lets the implementor be used as the target type of `Value::unbox`.
+
+- `ConstructType`
+  Lets the implementor be used as a type constructor.
+
+- `HasLayout`
+  Links a type constructor to its layout type.
+
+- `CCallArg`
+  Lets the implementor be used as an argument type of a function called via `ccall`.
+
+- `CCallReturn`
+  Lets the implementor be used as the return type of a function called via `ccall`.
+
+- `Enum`
+  Maps the implementor to a Julia enum.
+
+We can use JlrsCore.jl to generate bindings to Julia types which derive these traits if applicable. These bindings provide an interface to existing Julia types, and can't be used to expose Rust types to Julia.
+
+
+# Generating bindings
+
+We can generate bindings for Julia types with the `reflect` function found in the `Reflect` module of JlrsCore.jl, it can be called with a vector of types.
+
+```julia
+julia> using JlrsCore.Reflect
+
+julia> struct MyStruct
+           a::Int8
+           b::Tuple{Int8, UInt8}
+       end
+
+julia> struct MyWrapper
+           ms::MyStruct
+       end
+
+julia> reflect([MyWrapper])
+#[repr(C)]
+#[derive(Clone, Debug, Unbox, ValidLayout, Typecheck, IntoJulia, ValidField, IsBits, ConstructType, CCallArg, CCallReturn)]
+#[jlrs(julia_type = "Main.MyStruct")]
+pub struct MyStruct {
+    pub a: i8,
+    pub b: ::jlrs::data::layout::tuple::Tuple2<i8, u8>,
+}
+
+#[repr(C)]
+#[derive(Clone, Debug, Unbox, ValidLayout, Typecheck, IntoJulia, ValidField, IsBits, ConstructType, CCallArg, CCallReturn)]
+#[jlrs(julia_type = "Main.MyWrapper")]
+pub struct MyWrapper {
+    pub ms: MyStruct,
+}
+```
+
+As we can see, only `MyWrapper` has to be included to recursively generate bindings for `MyStruct` as well.[^1] The generated bindings derive all traits they can, and are annotated with the path to the type they've been generated from. It's important that this path matches the path where the type exists at runtime.
+
+`reflect` has two keyword parameters, `f16` and `complex`. Either of these can be set to true when the feature with the same name is enabled for jlrs to map a `Float16` to `half::f16` and `Complex{T}` to `num::Complex<T>` respectively.
+
+There are three things that `reflect` can't handle:
+
+1. Types that have a field with a `Union` type that references a generic parameter.
+2. Types that have a field with a `Tuple` type that references a generic parameter.
+3. Types with atomic fields.[^2]
+
+Note that this list doesn't include `Union` fields in general; as long as all possible variants are known, the layout is static and a valid layout can be generated:
+
+```julia
+julia> using JlrsCore.Reflect
+
+julia> struct MyBitsUnionStruct
+           u::Union{Int16, Tuple{UInt8, UInt8, UInt8, UInt8, UInt8}}
+       end
+
+julia> struct MyUnionStruct
+           u::Union{Int16, Vector{UInt8}}
+       end
+
+julia> reflect([MyBitsUnionStruct, MyUnionStruct])
+#[repr(C)]
+#[derive(Clone, Debug, Unbox, ValidLayout, Typecheck, ValidField, ConstructType, CCallArg)]
+#[jlrs(julia_type = "Main.MyBitsUnionStruct")]
+pub struct MyBitsUnionStruct {
+    #[jlrs(bits_union_align)]
+    _u_align: ::jlrs::data::layout::union::Align2,
+    #[jlrs(bits_union)]
+    pub u: ::jlrs::data::layout::union::BitsUnion<5>,
+    #[jlrs(bits_union_flag)]
+    pub u_flag: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Debug, Unbox, ValidLayout, Typecheck, ValidField, ConstructType, CCallArg)]
+#[jlrs(julia_type = "Main.MyUnionStruct")]
+pub struct MyUnionStruct<'scope, 'data> {
+    pub u: ::std::option::Option<::jlrs::data::managed::value::ValueRef<'scope, 'data>>,
+}
+```
+
+Support for inlined unions is limited to representation, the `BitsUnion` type is an opaque blob of bytes.
+
+If bindings for a parametric type are requested, the most generic bindings are generated:
+
+```julia
+julia> using JlrsCore.Reflect
+
+julia> struct MyParametricStruct{T}
+           a::T
+       end
+
+julia> reflect([MyParametricStruct{UInt8}])
+#[repr(C)]
+#[derive(Clone, Debug, Unbox, ValidLayout, Typecheck, ValidField, IsBits, ConstructType, CCallArg, CCallReturn)]
+#[jlrs(julia_type = "Main.MyParametricStruct")]
+pub struct MyParametricStruct<T> {
+    pub a: T,
+}
+```
+
+Despite asking for bindings for `MyParametricStruct{UInt8}`, we got them for `MyParametricStruct{T}`.
+
+Any type parameter that doesn't affect the layout is elided. In this case a separate layout type and type constructor are generated, which are linked with the `HasLayout` trait:
+
+```julia
+julia> using JlrsCore.Reflect
+
+julia> struct MyElidedStruct{T}
+           a::UInt8
+       end
+
+julia> reflect([MyElidedStruct{UInt8}])
+#[repr(C)]
+#[derive(Clone, Debug, Unbox, ValidLayout, Typecheck, ValidField, IsBits)]
+#[jlrs(julia_type = "Main.MyElidedStruct")]
+pub struct MyElidedStruct {
+    pub a: u8,
+}
+
+#[derive(ConstructType, HasLayout)]
+#[jlrs(julia_type = "Main.MyElidedStruct", constructor_for = "MyElidedStruct", scope_lifetime = false, data_lifetime = false, layout_params = [], elided_params = ["T"], all_params = ["T"])]
+pub struct MyElidedStructTypeConstructor<T> {
+    _t: ::std::marker::PhantomData<T>,
+}
+```
+
+[^1]: Every type that is recursively inlined into the requested layout is included.
+
+[^2]: Type constuctors are generated for types with atomic fields.
+
+
+# Customizing bindings
+
+When `reflect` is used, the names of types and fields of the generated bindings are the same as their Julia counterparts. The type in Julia is also expected to be defined at a specific path. If this is problematic or otherwise undesirable, these names can be adjusted.
+
+`reflect` doesn't return a string, but an instance of a type called `Layouts` that can be used with the `renamestruct!`, `renamefields!`, and `overridepath!` functions. The functions are exported by the `Reflect` module, `renamestruct!` lets us rename the Rust type, `renamefields!` the fields of a generated type, and `overridepath!` overrides the path where the type object is defined in Julia.
+
+```julia
+julia> using JlrsCore.Reflect
+
+julia> struct MyZST end
+
+julia> layouts = reflect([MyZST]);
+
+julia> renamestruct!(layouts, MyZST, "MyZeroSizedType")
+
+julia> layouts
+#[repr(C)]
+#[derive(Clone, Debug, Unbox, ValidLayout, Typecheck, IntoJulia, ValidField, IsBits, ConstructType)]
+#[jlrs(julia_type = "Main.MyZST", zero_sized_type)]
+pub struct MyZeroSizedType {
+}
+```
+
+```julia
+julia> using JlrsCore.Reflect
+
+julia> struct Food
+           burger::Bool
+       end
+
+julia> layouts = reflect([Food]);
+
+julia> renamefields!(layouts, Food, [:burger => "hamburger"])
+
+julia> layouts
+#[repr(C)]
+#[derive(Clone, Debug, Unbox, ValidLayout, Typecheck, IntoJulia, ValidField, IsBits, ConstructType, CCallArg, CCallReturn)]
+#[jlrs(julia_type = "Main.Food")]
+pub struct Food {
+    pub hamburger: ::jlrs::data::layout::bool::Bool,
+}
+```
+
+```julia
+julia> using JlrsCore.Reflect
+
+julia> struct MyZeroSizedType end
+
+julia> layouts = reflect([MyZeroSizedType]);
+
+julia> overridepath!(layouts, MyZeroSizedType, "Main.A.MyZeroSizedType")
+
+julia> layouts
+#[repr(C)]
+#[derive(Clone, Debug, Unbox, ValidLayout, Typecheck, IntoJulia, ValidField, IsBits, ConstructType)]
+#[jlrs(julia_type = "Main.A.MyZeroSizedType", zero_sized_type)]
+pub struct MyZeroSizedType {
+}
+```
+
+
+# Multithreaded runtime
+
+In all examples so far we've used the local runtime, which is limited to a single thread. The multithreaded runtime can be used from any thread, this feature requires using at least Julia 1.9 and enabling the `multi-rt` feature.
+
+Using the multithreaded runtime instead of the local runtime is mostly a matter of starting the runtime differently.
+
+```rust,ignore
+use std::thread;
+
+use jlrs::{prelude::*, runtime::builder::Builder};
+
+fn main() {
+    let (mut mt_handle, thread_handle) = Builder::new().spawn_mt().expect("cannot init Julia");
+    let mut mt_handle2 = mt_handle.clone();
+
+    let t1 = thread::spawn(move || {
+        mt_handle.with(|handle| {
+            handle.local_scope::<_, 1>(|mut frame| {
+                // Safety: we're just printing a string
+                unsafe { Value::eval_string(&mut frame, "println(\"Hello from thread 1\")") }
+                    .expect("caught exception");
+            })
+        })
+    });
+
+    let t2 = thread::spawn(move || {
+        mt_handle2.with(|handle| {
+            handle.local_scope::<_, 1>(|mut frame| {
+                // Safety: we're just printing a string
+                unsafe { Value::eval_string(&mut frame, "println(\"Hello from thread 2\")") }
+                    .expect("caught exception");
+            })
+        })
+    });
+
+    t1.join().expect("thread 1 panicked");
+    t2.join().expect("thread 2 panicked");
+    thread_handle.join().expect("runtime thread panicked")
+}
+```
+
+Julia is initialized on a background thread when `spawn_mt` is called. This method returns an `MtHandle` that we can use to call into Julia and a handle to the runtime thread. The `MtHandle` can be cloned and sent to other threads, by calling `MtHandle::with` the thread is temporarily put into a state where it can create scopes and call into Julia. The runtime thread shuts down when all `MtHandle`s have been dropped.
+
+Instead of spawning the runtime thread, we can also initialize Julia on the current thread and spawn a new thread that can use an `MtHandle`:
+
+```rust,ignore
+use std::thread;
+
+use jlrs::{
+    prelude::*,
+    runtime::{builder::Builder, handle::mt_handle::MtHandle},
+};
+
+fn main_inner(mut mt_handle: MtHandle) {
+    let mut mt_handle2 = mt_handle.clone();
+
+    let t1 = thread::spawn(move || {
+        mt_handle.with(|handle| {
+            handle.local_scope::<_, 1>(|mut frame| {
+                // Safety: we're just printing a string
+                unsafe { Value::eval_string(&mut frame, "println(\"Hello from thread 1\")") }
+                    .expect("caught exception");
+            })
+        })
+    });
+
+    let t2 = thread::spawn(move || {
+        mt_handle2.with(|handle| {
+            handle.local_scope::<_, 1>(|mut frame| {
+                // Safety: we're just printing a string
+                unsafe { Value::eval_string(&mut frame, "println(\"Hello from thread 2\")") }
+                    .expect("caught exception");
+            })
+        })
+    });
+
+    t1.join().expect("thread 1 panicked");
+    t2.join().expect("thread 2 panicked");
+}
+
+fn main() {
+    Builder::new().start_mt(main_inner).expect("cannot init Julia");
+}
+```
+
+This is useful if we interact with code in Julia that is picky about being called from the main application thread, e.g. code involving Qt.
+
+
+# Garbage collection, locks, and other blocking functions
+
+Way back when we first discussed managed data and rooting, it was said that the GC can be triggered by allocating managed data. When the GC is triggered by some thread, that thread will block until all other threads that can call into Julia have reached a safepoint. A safepoint is normally reached by allocating managed data, recent versions of Julia will also reach one when a Julia function is called. When a safepoint is reached, the thread promises that all managed data it still needs to use is rooted, or at least reachable from a root.
+
+This isn't a problem if only one thread is used, but can easily become an issue when multiple threads can call into Julia. The problem is most obvious with locks. Let's say we have the following situation: thread A and B can call into Julia, these threads acquire a lock and allocate some Julia data. If one of the threads triggers the garbage collector while the other thread is waiting for the lock we run into a deadlock situation. The other thread will never hit a safepoint because it's waiting on a lock that will never be released.
+
+To solve this particular issue, jlrs provides several GC-safe lock types. GC-safe means that it is safe to run the GC even without hitting an explicit safepoint. If we use GC-safe locks in the problem above, the deadlock is resolved because the GC can run while we wait for the lock. The following GC-safe locks are provided:
+
+- `GcSafeMutex`
+- `GcSafeFairMutex`
+- `GcSafeRwLock`
+- `GcSafeOnceLock`
+
+These GC-safe alternatives are adapted from similarly-named types found in parking_lot and once_cell, the only difference is that blocking operations are called in a GC-safe block.
+
+A similar issue arises if we call arbitrary long-running code that doesn't all into Julia: it doesn't reach a safepoint, if the GC needs to run it needs to wait until this operation has completed. Since the operation doesn't need to call into Julia, it's safe to execute it in a GC-safe block. We can use the `gc_safe` function to do so, it's unsound to interact with Julia any way inside a GC-safe block.
+
+```rust,ignore
+use std::{thread, time::Duration};
+
+use jlrs::{memory::gc::gc_safe, prelude::*, runtime::builder::Builder};
+
+fn long_running_op() {
+    thread::sleep(Duration::from_secs(5));
+}
+
+fn main() {
+    let (mut mt_handle, thread_handle) = Builder::new().spawn_mt().expect("cannot init Julia");
+    let mut mt_handle2 = mt_handle.clone();
+
+    let t1 = thread::spawn(move || {
+        mt_handle.with(|handle| {
+            handle.local_scope::<_, 1>(|mut frame| {
+                // Safety: long_running_op doesn't interact with Julia
+                unsafe { gc_safe(long_running_op) };
+
+                // Safety: we're just printing a string
+                unsafe { Value::eval_string(&mut frame, "println(\"Hello from thread 1\")") }
+                    .expect("caught exception");
+            })
+        })
+    });
+
+    let t2 = thread::spawn(move || {
+        mt_handle2.with(|handle| {
+            handle.local_scope::<_, 1>(|mut frame| {
+                // Safety: we're just printing a string
+                unsafe { Value::eval_string(&mut frame, "println(\"Hello from thread 2\")") }
+                    .expect("caught exception");
+            })
+        })
+    });
+
+    t1.join().expect("thread 1 panicked");
+    t2.join().expect("thread 2 panicked");
+    thread_handle.join().expect("runtime thread panicked")
+}
+```
+
+
+# Async runtime
+
+The async runtime lets us run Julia on a background thread, its handle lets us send tasks to this thread. We need to enable the `async-rt` feature to use it. Some tasks support async operations, so we'll also need an async executor. A tokio-based executor is available when the `tokio-rt` feature is enabled, this feature automatically enables `async-rt` as well.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let (async_handle, thread_handle) = Builder::new()
+        .n_threads(4)
+        .async_runtime(Tokio::<3>::new(false))
+        .spawn()
+        .expect("cannot init Julia");
+
+    std::mem::drop(async_handle);
+    thread_handle.join().expect("runtime thread panicked")
+}
+```
+
+We've configured Julia to use 4 threads.[^1] The builder is upgraded to an `AsyncBuilder` by providing it with the necessary configuration. Here we've configure the runtime to use the tokio-based executor without the I/O driver, and to support 3 concurrent tasks.[^2] If you want to use this driver, enable the `tokio-net` feature and change the argument of `Tokio::new` to `true`.
+
+By default, an unbounded channel is used to let the handles communicate with the runtime thread. A bounded channel can be used by calling `AsyncBuilder::channel_capacity` before spawning the runtime.
+
+After spawning the runtime, we get an `AsyncHandle` that we can use to interact with the runtime thread and a `JoinHandle` to that thread. The runtime thread shuts down when all `AsyncHandle`s have been dropped. It's also possible to manually shut down the runtime by calling `AsyncHandle::close`.
+
+[^1]: Since Julia 1.9 these threads belong to Julia's default thread pool, we can also configure the number of interactive threads with `(Async)Builder::n_interactive_threads`.
+
+[^2]: Multiple tasks that support async operations can be executed concurrently, the runtime can switch to another task while waiting for an async operation to complete. Tasks are not executed in parallel, all tasks are executed on the single runtime thread.
+
+
+# Blocking tasks
+
+Blocking tasks are the simplest kind of task, they're closures that take a `GcFrame` which are sent to the runtime thread and executed in a dynamic scope. As their name implies, when a blocking task is executed the runtime thread is blocked until the task has completed.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let (async_handle, thread_handle) = Builder::new()
+        .n_threads(4)
+        .async_runtime(Tokio::<3>::new(false))
+        .spawn()
+        .expect("cannot init Julia");
+
+    let dispatch = async_handle
+        .blocking_task(|mut frame| {
+            // Safety: we're just printing a string
+            unsafe { Value::eval_string(&mut frame, "println(\"Hello from the async runtime\")") }
+                .expect("caught an exception");
+        });
+
+    let recv = dispatch
+        .try_dispatch()
+        .expect("cannot dispatch task");
+
+    recv.blocking_recv()
+        .expect("cannot receive result");
+
+    std::mem::drop(async_handle);
+    thread_handle.join().expect("runtime thread panicked")
+}
+```
+
+Sending a task is a two-step process. The `AsyncHandle::blocking_task` method returns an instance of `Dispatch`, which provides sync and async methods to dispatch the task. If the backing channel is full, `Dispatch::try_dispatch` fails but returns itself as an `Err` to allow retrying later.
+
+If the task has been dispatched successfully, the receiving half of tokio's oneshot-channel is returned which will eventually receive the result of that task.
+
+
+# Async tasks
+
+Async tasks can call async functions, and while awaiting an async function the runtime can switch to another async task. It's possible to call any Julia function as a new Julia task with the methods of the `CallAsync` trait and await its completion. For this to be effective Julia must be configured to use multiple threads.
+
+To create an async task we'll need to implement the `AsyncTask` trait. Let's implement a simple task that adds two numbers.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+struct AdditionTask {
+    a: f64,
+    b: f64,
+}
+
+#[async_trait(?Send)]
+impl AsyncTask for AdditionTask {
+    type Output = f64;
+
+    async fn run<'frame>(&mut self, mut frame: AsyncGcFrame<'frame>) -> Self::Output {
+        let v1 = Value::new(&mut frame, self.a);
+        let v2 = Value::new(&mut frame, self.b);
+        let add_fn = Module::base(&frame)
+            .global(&mut frame, "+")
+            .expect("cannot find Base.+");
+
+        // Safety: we're just adding two floating-point numbers
+        unsafe { add_fn.call_async(&mut frame, [v1, v2]) }
+            .await
+            .expect("caught an exception")
+            .unbox::<f64>()
+            .expect("cannot unbox as f64")
+    }
+}
+
+fn main() {
+    let (async_handle, thread_handle) = Builder::new()
+        .n_threads(4)
+        .async_runtime(Tokio::<3>::new(false))
+        .spawn()
+        .expect("cannot init Julia");
+
+    let recv = async_handle
+        .task(AdditionTask { a: 1.0, b: 2.0 })
+        .try_dispatch()
+        .expect("runtime has shut down");
+
+    let res = recv
+        .blocking_recv()
+        .expect("cannot receive result");
+
+    assert_eq!(res, 3.0);
+
+    std::mem::drop(async_handle);
+    thread_handle.join().expect("runtime thread panicked")
+}
+```
+
+The trait implementation is marked with `#[async_trait(?Send)]` because the future returned by `AsyncTask::run` can't be sent to another thread but must be executed on the runtime thread. This method is very similar to the closures we've used with scopes so far, the major difference as that it's an async method and that it takes an `AsyncGcFrame` that we haven't used before.
+
+An `AsyncGcFrame` is a `GcFrame` that provides some extra features. In particular, the methods of the `CallAsync` trait, e.g. `call_async`, don't take an arbitrary target but must be called with a mutable reference to an `AsyncGcFrame`. These methods execute a function as a new Julia task in a way that lets us await its completion, the runtime thread can switch to other tasks while it's waiting for this task to be completed.
+
+Dispatching an async task to the runtime is very similar to dispatching a blocking task, we just need to replace `AsyncHandle::blocking_task` with `AsyncHandle::task`.
+
+
+# Persistent tasks
+
+Persistent tasks let us set up a task that we can send messages to indepently of the async runtime. When a persistent task is executed, it sets up its internal state and returns a handle that lets us call the task with some input data. The internal state is allowed to reference managed data. The task lives until all handles have been dropped.
+
+To create a persistent task we'll need to implement the `PersistentTask` trait. Let's implement a task that accumulates a sum of floating point numbers.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+struct AccumulatorTask {
+    init_value: f64,
+}
+
+#[async_trait(?Send)]
+impl PersistentTask for AccumulatorTask {
+    type State<'state> = Value<'state, 'static>;
+    type Input = f64;
+    type Output = JlrsResult<f64>;
+
+    async fn init<'frame>(
+        &mut self,
+        frame: AsyncGcFrame<'frame>,
+    ) -> JlrsResult<Self::State<'frame>> {
+        frame.with_local_scope::<_, _, 2>(|mut async_frame, mut local_frame| {
+            let ref_ctor = Module::base(&local_frame).global(&mut local_frame, "Ref")?;
+            let init_v = Value::new(&mut local_frame, self.init_value);
+
+            // Safety: we're just calling the constructor of `Ref`, which is safe.
+            let state = unsafe { ref_ctor.call1(&mut async_frame, init_v) }.into_jlrs_result()?;
+            Ok(state)
+        })
+    }
+
+    async fn run<'frame, 'state: 'frame>(
+        &mut self,
+        mut frame: AsyncGcFrame<'frame>,
+        state: &mut Self::State<'state>,
+        input: Self::Input,
+    ) -> Self::Output {
+        let getindex_func = Module::base(&frame).global(&mut frame, "getindex")?;
+        let setindex_func = Module::base(&frame).global(&mut frame, "setindex!")?;
+
+        // Safety: Calling getindex with state is equivalent to calling `state[]`.
+        let current_sum = unsafe { getindex_func.call1(&mut frame, *state) }
+            .into_jlrs_result()?
+            .unbox::<f64>()?;
+
+        let new_sum = current_sum + input;
+        let new_value = Value::new(&mut frame, new_sum);
+
+        // Safety: Calling setindex! with state and new_value is equivalent to calling
+        // `state[] = new_value`.
+        unsafe { setindex_func.call2(&mut frame, *state, new_value) }.into_jlrs_result()?;
+
+        Ok(new_sum)
+    }
+}
+
+fn main() {
+    let (async_handle, thread_handle) = Builder::new()
+        .n_threads(4)
+        .async_runtime(Tokio::<3>::new(false))
+        .spawn()
+        .expect("cannot init Julia");
+
+    let acc_task_handle = async_handle
+        .persistent(AccumulatorTask { init_value: 1.0 })
+        .try_dispatch()
+        .expect("runtime has shut down")
+        .blocking_recv()
+        .expect("cannot receive result")
+        .expect("AccumulatorTask::init failed");
+
+    let recv = acc_task_handle
+        .call(2.0)
+        .try_dispatch()
+        .expect("runtime has shut down");
+
+    let res = recv
+        .blocking_recv()
+        .expect("cannot receive result")
+        .expect("AccumulatorTask::run failed");
+
+    assert_eq!(res, 3.0);
+
+    std::mem::drop(acc_task_handle);
+    std::mem::drop(async_handle);
+    thread_handle.join().expect("runtime thread panicked")
+}
+```
+
+When the persistent task is started by the async runtime, the `init` method is called to initialize the state of the task. In this case the state is an instance of `Ref{Float64}`, We can't use a `Float64` directly because `Float64` isn't a mutable type. Any data rooted in the async frame provided to `init` function remains rooted until the task has shut down, a local scope is used to root temporary data so we only need to root the state in the async frame.
+
+If the task is initialized successfully a `PersistentHandle` is returned. This handle provides a `call` method which lets us call the task's `run` method with some input data. This works just like dispatching a task to the async runtime.
+
+Like an `AsyncHandle`, a `PersistentHandle` can be cloned and shared across threads. The task shuts down when all of its handles have been dropped.
+
+
+# Combining the multithreaded and async runtimes
+
+It's possible to combine the functionality of the multithreaded and async runtimes.
+
+The `AsyncBuilder` provides `start_mt` and `spawn_mt` methods that let us use both an `MtHandle` and an `AsyncHandle` when both the `async-rt` and `multi-rt` features have been enabled. The  `AsyncHandle` lets us send tasks to the main runtime thread, which is useful if we have some code that we must be called from that thread.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let (mt_handle, async_handle, thread_handle) = Builder::new()
+        .n_threads(4)
+        .async_runtime(Tokio::<3>::new(false))
+        .spawn_mt()
+        .expect("cannot init Julia");
+
+    std::mem::drop(async_handle);
+    std::mem::drop(mt_handle);
+    thread_handle.join().expect("runtime thread panicked")
+}
+```
+
+We can also create thread pools where each worker thread can call into Julia and runs an async runtime.[^1] We can configure and create new pools with `MtHandle::pool_builder`. When a pool is spawned, an `AsyncHandle` to the pool is returned. Taslks are sent to this pool instead of a specific thread, it can be handled by any of its workers. If a worker dies due to a panic a new worker is automatically spawned.[^2]
+
+Workers can be dynamically added and removed with `AsyncHandle::try_add_worker` and `AsyncHandle::try_remove_worker`. The pool shuts down when all workers have been removed, all handles have been dropped, or if its closed explicitly. It's not possible to add workers to the async runtime itself, only to pools.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let (mt_handle, thread_handle) = Builder::new()
+        .n_threads(4)
+        .spawn_mt()
+        .expect("cannot init Julia");
+
+    let pool_handle = mt_handle
+        .pool_builder(Tokio::<3>::new(false))
+        .n_workers(3.try_into().unwrap())
+        .spawn();
+
+    assert!(pool_handle.try_add_worker());
+    assert!(pool_handle.try_remove_worker());
+
+    std::mem::drop(pool_handle);
+    std::mem::drop(mt_handle);
+    thread_handle.join().expect("runtime thread panicked")
+}
+```
+
+One additional advantage that pools have over the async runtime thread is that the latency is typically much lower. If we don't need code to run on the main thread specifically, it's more effective to use the multithreaded runtime and create a pool instead.
+
+[^1]: More precisely, not an async runtime but an instance of an executor.
+
+[^2]: While it's still recommended to abort on panics, it's safe to panic on a worker thread as long as we don't unwind into Julia code by panicking in a function called with `ccall`.
+
+
+# ccall basics
+
+So far we've focussed on calling Julia from Rust by embedding Julia in a Rust application, in this chapter we start with the other side of the story: calling Rust from Julia. One of the nice features of Julia is its `ccall` interface, which can call functions that use the C ABI, including `extern "C"` functions in Rust.[^1] Most of this chapter won't use jlrs, Julia can load arbitrary dynamic libraries at runtime.
+
+The intent of this chapter is to cover some essential information about `ccall`. For more in-depth information, read the [Calling C and Fortran Code] chapter in the Julia manual.
+
+To get started with calling into Rust from Julia, we're going to look at a final embedding example first before creating our first dynamic library. We'll expose a function pointer to Julia and call it with `ccall`.
+
+```rust,ignore
+use std::ffi::c_void;
+
+use jlrs::prelude::*;
+
+unsafe extern "C" fn add(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+static JULIA_CODE: &str = "function call_rust(ptr::Ptr{Cvoid}, a::Float64, b::Float64)
+    ccall(ptr, Float64, (Float64, Float64), a, b)
+end";
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 5>(|mut frame| {
+        let ptr = Value::new(&mut frame, add as *mut c_void);
+
+        let a = Value::new(&mut frame, 1.0f64);
+        let b = Value::new(&mut frame, 2.0f64);
+
+        // Safety: we're just defining a function.
+        let func = unsafe { Value::eval_string(&mut frame, JULIA_CODE) }
+            .expect("an exception occurred");
+
+        // Safety: Immutable types are passed and returned by value, so `add`
+        // has the correct signature for the `ccall` in `call_rust`. All
+        // `add` does is add `a` and `b`, which is perfectly safe.
+        let res = unsafe { func.call3(&mut frame, ptr, a, b) }
+            .expect("an exception occurred")
+            .unbox::<f64>()
+            .expect("not an f64");
+
+        assert_eq!(res, 3.0f64);
+    });
+}
+```
+
+All this example does is call `add`, which adds two numbers and returns the result. We can convert this function to `Value` by converting it to a void pointer first. It's not possible to call `ccall` directly from Rust because the return and argument types must be statically known, so we create a function that `ccall`s the function pointer with the given arguments by evaluating its definition.
+
+[^1]: An ABI defines things like how a function call works at a binary level.
+
+[Calling C and Fortran Code]: https://docs.julialang.org/en/v1/manual/calling-c-and-fortran-code/
+
+
+# Argument types
+
+Let's take a closer look at how we used `ccall` in the previous section:
+
+```julia
+ccall(ptr, Float64, (Float64, Float64), a, b)
+```
+
+The first argument is a pointer to the function we want to call, the second is the return type, the third a tuple of the argument types, and finally the arguments that the function must be called with. It's the caller's responsibility to ensure these types match the argument and return types of the function that will be called.
+
+In the chapter on types and layouts, we've seen that the layout of immutable types corresponds to the direct translation of their definition from Julia to Rust:
+
+```julia
+julia> struct A
+           a::Int8
+       end
+
+julia> struct B
+           a::A
+       end
+```
+
+maps to
+
+```rust,ignore
+#[repr(C)]
+struct A {
+    a: i8
+}
+
+#[repr(C)]
+struct B {
+    a: A
+}
+```
+
+It's best to mostly restrict ourselves to `isbits` types in foreign interfaces. We can make limited use of mutable types, but it's important that we never use a mutable type as an argument type directly. The reason is that it's indeterminate whether the argument is passed to the foreign function by value or by reference. To ensure an argument it taken by reference, we can wrap its argument type with `Ref`:
+
+```julia
+julia> mutable struct MFloat64
+           a::Float64
+       end
+
+julia> function call_rust(ptr::Ptr{Cvoid}, a::MFloat64, b::MFloat64)
+           ccall(ptr, Float64, (Ref{MFloat64}, Ref{MFloat64}), a, b)
+       end
+```
+
+The Rust function could be implemented as follows:
+
+```rust,ignore
+#[repr(C)]
+struct MFloat64 {
+    a: f64,
+}
+
+unsafe extern "C" fn add(a: *mut MFloat64, b: *mut MFloat64) -> f64 {
+    (*a).a + (*b).a
+}
+```
+
+We have to use mutable pointers instead of mutable references because `a` and `b` can alias.
+
+Since `Ref` is a mutable type, it's perfectly fine to treat a `Ref{Float64}` as `*mut f64` instead of defining a custom type, This also holds true for other `isbits` types, but not for immutable types in general. In particular, we can't change what value a pointer field points to. Say we have the following struct:
+
+```julia
+julia> mutable struct MFloats64
+           a::MFloat64
+           b::MFloat64
+       end
+```
+
+which maps to
+
+```rust,ignore
+#[repr(C)]
+struct MFloats64 {
+    a: *mut MFloat64,
+    b: *mut MFloat64,
+}
+```
+
+The following code is unsound:
+
+```rust,ignore
+unsafe extern "C" fn unsound_set(mf: *mut MFloats64, a: *mut MFloat64) {
+    (*mf).a = a;
+}
+```
+
+The reason is that we need to insert a write barrier after changing what value a field points to,[^1] but we can't do that here because we can't access the Julia's C API.
+
+[^1]: Managed data starts out as a young object, after surviving garbage collection it becomes old. In practice, most objects never become old, and the GC can do an incremental collection where it only looks at young objects. If a mutation can cause an old object to reference a young one, a write barrier must be inserted after that mutation. This ensures the GC is aware that this old object references a young one, and must be included in an incremental collection.
+
+
+# Arrays
+
+To pass an array as an argument, we'll need to convert it to a pointer to its first element. This is a matter of expressing its argument type as `Ptr{ElemType}`.
+
+```rust,ignore
+unsafe extern "C" fn add_one(ptr: *mut i8, len: usize) {
+    std::slice::from_raw_parts_mut(ptr, len)
+        .iter_mut()
+        .for_each(|i| *i += 1);
+}
+```
+
+```julia
+julia> function call_rust(ptr::Ptr{Cvoid}, arr::Vector{Int8})
+           ccall(ptr, Cvoid, (Ptr{Int8}, UInt), arr, length(arr))
+       end
+```
+
+This approach also works for higher-ranked arrays, the elements are laid out in column-major order.
+
+Avoid mutable element types. Array elements essentially behave like struct fields, and we can't insert write barriers.
+
+
+# Return type
+
+The story for the return type is simpler: we need to limit ourselves to returning `isbits` types, if nothing is returned we can use `Cvoid` like we've seen in the array example. This is admittedly a major oversimplification, but possibilities are limited because we can't allocate new managed data.
+
+
+# Dynamic library
+
+The embedding example is rather contrived, we rarely need to expose a function from an application that embeds Julia. It's much more likely that some Rust crate implements useful functionality that we want to expose to Julia.
+
+Julia can load dynamic libraries at runtime.[^1] Let's create a new dynamic library that exposes the `add` function we've defined above. We start by creating a new crate.[^2]
+
+```bash
+cargo new julia_lib --lib
+```
+
+We need to change the crate type to `cdylib`, this can be configured in `Cargo.toml`:
+
+```toml
+[package]
+name = "julia_lib"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+```
+
+We don't need to add jlrs as a dependency, we'll discuss the advantages and disadvantages of using jlrs with dynamic libraries in the next chapter.
+
+Replace the content of `lib.rs` with the following code:
+
+```rust,ignore
+#[no_mangle]
+pub unsafe extern "C" fn add(a: f64, b: f64) -> f64 {
+    a + b
+}
+```
+
+The function is annotated with `#[no_mangle]` to prevent the name from being mangled. After building with `cargo build` we can find the library in `target/debug`. On Linux it will be named `libjulia_lib.so`, on macOS `libjulia_lib.dylib`, and on Windows `libjulia_lib.dll`. Let's use it!
+
+Open the Julia REPL in `julia_lib`'s root directory and evaluate the following code:
+
+```julia
+julia> using Libdl
+
+julia> handle = dlopen("./target/debug/libjulia_lib")
+Ptr{Nothing} @0x0000000000e2a620
+
+julia> func = dlsym(handle, "add")
+Ptr{Nothing} @0x000073b0dec02100
+
+julia> ccall(func, Float64, (Float64, Float64), 1.0, 2.0)
+3.0
+```
+
+Note that we don't have to provide the extension when opening the library.
+
+If the library is on the library search path we don't even need to open it or acquire function pointers, but can refer to it directly:
+
+```julia
+julia> ccall((:add, "libjulia_lib"), Float64, (Float64, Float64), 1.0, 2.0)
+3.0
+```
+
+[^1]: Using the GNU toolchain is recommended on Windows. It might also be possible to use the MSVC toolchain but this hasn't been tested.
+
+[^2]: If the crate we want to expose already provides a C API we won't need an intermediate crate. We can directly build the library and adapt to the existing API instead.
+
+
+# Custom types
+
+What if we want to expose Rust data of a type that doesn't correspond to any Julia type?
+
+The most straighforward option is to box the data, leak it as a pointer, and treat it as `Ptr{Cvoid}` in Julia. `Ptr{Cvoid}` is an `isbits` type, so we can simply return the pointer from Rust and expect a `Ptr{Cvoid}` in Julia. We'll need a custom function to free the data we've leaked when we're done using it.
+
+For the sake of clarity, the examples in this tutorial assume our library is on the library search path so we can access its content by name.
+
+```rust,ignore
+#[no_mangle]
+pub unsafe extern "C" fn new_rs_string(ptr: *const u8, len: usize) -> *mut String {
+    let slice = std::slice::from_raw_parts(ptr, len);
+    let s = String::from_utf8_lossy(slice).into_owned();
+    let boxed = Box::new(s);
+    Box::leak(boxed) as *mut _
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn print_rs_string(s: *mut String) {
+    let s = s.as_ref().unwrap();
+    println!("{s}")
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn free_rs_string(s: *mut String) {
+    let _ = Box::from_raw(s);
+}
+```
+
+```julia
+julia> s = "Foo"
+"Foo"
+
+julia> rs_s = ccall((:new_rs_string, "libjulia_lib"), Ptr{Cvoid}, (Ptr{UInt8}, UInt), s, sizeof(s))
+Ptr{Nothing} @0x000000000224ea40
+
+julia> ccall((:print_rs_string, "libjulia_lib"), Cvoid, (Ptr{Cvoid},), rs_s)
+Foo
+
+julia> ccall((:free_rs_string, "libjulia_lib"), Cvoid, (Ptr{Cvoid},), rs_s)
+
+```
+
+If we can't box the data we'll need to adapt to this type in Julia by defining an immutable type.
+
+```rust,ignore
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Compound {
+    a: f64,
+    b: f64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn new_compound(a: f64, b: f64) -> Compound {
+    Compound { a, b }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn add_compound(compound: Compound) -> f64 {
+    compound.a + compound.b
+}
+```
+
+```julia
+julia> struct Compound
+           a::Float64
+           b::Float64
+       end
+
+julia> ccall((:new_compound, "libjulia_lib"), Compound, (Float64, Float64), 1.0, 2.0)
+Compound(1.0, 2.0)
+
+julia> ccall((:add_compound, "libjulia_lib"), Float64, (Compound,), compound)
+3.0
+```
+
+
+# Yggdrasil
+
+If we completely removed Rust from our system before trying to add and use a package that depends on Rust code like RustFFT.jl, we'd see that everything still works correctly. Things still work because a recipe to build the library is available in [Yggdrasil]. When we contribute a recipe to Yggdrasil, that library will be prebuilt and made available as a JLL package.
+
+A recipe for a library written in Rust will typically look something like this, and should be named `build_tarballs.jl`:
+
+```julia
+# Note that this script can accept some limited command-line arguments, run
+# `julia build_tarballs.jl --help` to see a usage message.
+using BinaryBuilder, Pkg
+
+name = "{{crate_name}}"
+version = v"0.1.0"
+
+# Collection of sources required to complete build
+sources = [
+    GitSource("https://github.com/{{user}}/{{crate_name}}.git",
+              "{full commit hash, e.g.: 52ab80563a07d02e3d142f85101853bbf5c0a8a1}"),
+]
+
+# Bash recipe for building across all platforms
+script = raw"""
+cd $WORKSPACE/srcdir/{{crate_name}}
+
+cargo build--release --verbose
+install_license LICENSE
+install -Dvm 0755 "target/${rust_target}/release/"*{{crate_name}}.${dlext} "${libdir}/lib{{crate_name}}.${dlext}"
+"""
+
+# These are the platforms we will build for by default, unless further
+# platforms are passed in on the command line
+platforms = supported_platforms(; experimental=true)
+# Rust toolchain for i686 Windows is unusable
+filter!(p -> !Sys.iswindows(p) || arch(p) != "i686", platforms)
+
+# The products that we will ensure are always built
+products = [
+    LibraryProduct("lib{{crate_name}}", :lib{{crate_name}}),
+]
+
+# Dependencies that must be installed before this package can be built
+dependencies = [
+    Dependency("Libiconv_jll"; platforms=filter(Sys.isapple, platforms)),
+]
+
+# Build the tarballs.
+build_tarballs(ARGS, name, version, sources, script, platforms, products, dependencies;
+               julia_compat="1.6", compilers=[:c, :rust])
+```
+
+This recipe should work for crates that are written purely in Rust after replacing `{{user}}` and `{{crate_name}}`. If the crate depends on some other dynamic library, recipes must be available for those libraries so we can add them to the list of dependencies. This is outside the scope of this tutorial, see the [BinaryBuilder.jl documentation] for more information.
+
+One final detail that we need to keep in mind is that BinaryBuilder.jl uses its own Rust toolchain. We can check which version of Rust will be used in the [recipe for the Rust toolchain].
+
+We can test our recipe locally by executing it: `julia build_tarballs.jl`. In practice it's useful to set the `--verbose` and `--debug` flags. If `--debug` is set, a debug prompt is opened on failure to help diagnose and resolve the issue. On success, we can find the compiled library in the `products` directory, which we can use as if we had compiled it manually.
+
+Now that we've ensured everything works as expected, we can contribute our recipe to Yggdrasil. Fork the Yggdrasil repository, create a new directory for the recipe and put it in that directory. Commit these changes with a message like `"[{{crate_name}}] version 0.1.0"` and open a PR. If everything goes well and our PR is accepted, a new package will be published named `{{crate_name}}_jll`.
+
+Using this JLL package is a matter of adding it to Julia:
+
+```julia
+(@v1.10) pkg> add {{crate_name}}_jll
+   Resolving package versions...
+  Downloaded artifact: {{crate_name}}
+    Updating `~/.julia/environments/v1.10/Project.toml`
+  [54eccfce] + {{crate_name}}_jll v0.1.0+0
+    Updating `~/.julia/environments/v1.10/Manifest.toml`
+  [54eccfce] + {{crate_name}}_jll v0.1.0+0
+Precompiling project...
+  1 dependency successfully precompiled in 2 seconds. 86 already precompiled. 1 skipped during auto due to previous errors.
+
+julia> using {{crate_name}}_jll
+
+julia> {{crate_name}}_jll.lib{{crate_name}}_path
+"/path/to/lib{{crate_name}}.so"
+
+julia> ccall((:some_exported_function, {{crate_name}}_jll.lib{{crate_name}}_path), Cvoid, ())
+
+```
+
+[Yggdrasil]: https://github.com/JuliaPackaging/Yggdrasil
+[BinaryBuilder.jl documentation]: https://docs.binarybuilder.org/stable/
+[recipe for the Rust toolchain]: https://github.com/JuliaPackaging/Yggdrasil/blob/master/0_RootFS/Rust/build_tarballs.jl
+
+
+# `julia_module!`
+
+In the previous chapter we've created a dynamic library that exposed Rust code to Julia without using jlrs. Using jlrs provides many additional features, including better support for custom types, code generation, and integration with Julia code. The main disadvantage is that our library won't be compatible with different versions of Julia, but is compiled for the specific version selected with a version feature.
+
+In this chapter we'll use the `julia_module!` macro to export constants, types and functions to Julia. To use this make we have to enable the `jlrs-derive` and `ccall` features.
+
+```toml
+[package]
+name = "julia_module_tutorial"
+version = "0.1.0"
+edition = "2021"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[features]
+julia-1-6 = ["jlrs/julia-1-6"]
+julia-1-7 = ["jlrs/julia-1-7"]
+julia-1-8 = ["jlrs/julia-1-8"]
+julia-1-9 = ["jlrs/julia-1-9"]
+julia-1-10 = ["jlrs/julia-1-10"]
+julia-1-11 = ["jlrs/julia-1-11"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jlrs = { version = "0.21", features = ["jlrs-derive", "ccall"] }
+```
+
+It's important that we don't enable any runtime features like `local-rt` when we build a dynamic library.
+
+The following is a minimal example of `julia_module!`:
+
+```rust,ignore
+use jlrs::prelude::*;
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    // module content...
+}
+```
+
+The macro is transformed into a single function, `julia_module_tutorial_init_fn`, that can be used with JlrsCore.jl's `@wrapmodule` macro:
+
+```julia
+module JuliaModuleTutorial
+using JlrsCore.Wrap
+
+@wrapmodule("/path/to/libjulia_module_tutorial", :julia_module_tutorial_init_fn)
+
+function __init__()
+    @initjlrs
+end
+end
+```
+
+This is all the Julia code we'll need to write, the `@wrapmodule` macro generates the content of the module. For the sake of brevity, code samples in the following sections will write `module JuliaModuleTutorial ... end` as a shorthand for this module definition.
+
+
+# Constants
+
+The simplest thing we can export from Rust to Julia is a constant. New constants can be created from static and constant items whose type implements `IntoJulia`.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+const CONST_U8: u8 = 1;
+static STATIC_U8: u8 = 2;
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    const CONST_U8: u8;
+    const STATIC_U8: u8;
+}
+```
+
+If we compile this code and wrap it, we can access these constants:
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.CONST_U8
+0x01
+
+julia> JuliaModuleTutorial.STATIC_U8
+0x02
+```
+
+It's possible to rename a constant by putting `as NEW_NAME` at the end of the declaration. They can also be documented, Julia doctests are supported.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+const CONST_U8: u8 = 1;
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    ///     CONST_UINT8
+    ///
+    /// An exported constant.
+    const CONST_U8: u8 as CONST_UINT8;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.CONST_UINT8
+0x01
+
+help?> JuliaModuleTutorial.CONST_UINT8
+   CONST_UINT8
+
+  An exported constant.
+```
+
+
+# Functions
+
+Any function can be exported as long as its argument types and return type are compatible with Julia. This requires that these types implement `CCallArg` and `CCallReturn` respectively.
+
+These traits should not be implemented manually. jlrs provides implementations for primitive and managed types, bindings for Julia types generated with `JlrsCore.Reflect.reflect` will derive these traits when applicable. `CCallArg` is derived if the type has no elided type parameters[^1], isn't a zero-sized type, and is immutable. `CCallReturn` additionally requires that the type is an `isbits` type. If these properties hold, the data can be taken or returned by value, and the layout of the Rust type maps to a single Julia type.
+
+Exporting a function is a matter copying and pasting its signature:
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn add(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn add(a: f64, b: f64) -> f64;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.add(1.0, 2.0)
+3.0
+
+julia> JuliaModuleTutorial.add(1, 2.0)
+ERROR: MethodError: no method matching add(::Int64, ::Float64)
+```
+
+We don't have to mark our function as `extern "C"`, the `julia_module!` macro generates an `extern "C"` wrapper function for every exported function. These wrappers only exist inside the `julia_module_tutorial_init_fn` so we don't need to worry about name conflicts.
+
+Like constants, exported functions can be renamed and documented.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn add(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    ///     add!(::Float64, ::Float64)::Float64
+    fn add(a: f64, b: f64) -> f64 as add!;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.add!(1.0, 2.0)
+3.0
+
+help?> JuliaModuleTutorial.add!
+   add!(::Float64, ::Float64)::Float64
+```
+
+[^1]: i.e., ConstructType is also derived.
+
+
+# Managed arguments
+
+We're not limited to just using immutable types as function arguments, managed types also implement `CCallArg`. The function can just as easily take a `Module` or `Value` as an argument. If the argument type is `Value`, that argument's type is left unspecified in the generated function signature and passed to `ccall` as `Any`.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn print_module_name(module: Module) {
+    let name = module.name();
+    println!("{name:?}");
+}
+
+fn print_value(value: Value) {
+    println!("{value:?}");
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn print_module_name(module: Module);
+    fn print_value(value: Value);
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.print_module_name(JuliaModuleTutorial)
+:JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.print_value(JuliaModuleTutorial)
+Main.JuliaModuleTutorial
+```
+
+
+# Array arguments
+
+Without jlrs we had to convert arrays to a pointer to their first element if we wanted to access them in a `ccall`ed function, with jlrs taking an array argument directly isn't an issue.
+
+Any of the aliases of `ArrayBase` can be used as an argument type, they enforce the obvious restrictions: `Array` only enforces that the argument is an array, `TypedArray` puts restrictions on the element type, `RankedArray` on the rank, and `TypedRankedArray` on both. Other aliases like `Vector` are expressed in terms of these aliases so they can also be used as argument types.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+// Safety: the array must not be mutated from another thread
+unsafe fn sum_array(array: TypedArray<f64>) -> f64 {
+    array.bits_data().as_slice().iter().sum()
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn sum_array(array: TypedArray<f64>) -> f64;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.sum_array([1.0 2.0])
+3.0
+
+julia> JuliaModuleTutorial.sum_array([1.0; 2.0])
+3.0
+```
+
+
+# Typed values
+
+While it's nice that we can use `Value` to handle argument types that don't implement `CCallArg`, it's annoying that this doesn't introduce any restrictions on that argument. A `TypedValue` is a `Value` that has been annotated with its type constructor. When we use it as an argument type, the generated function will restrict that argument to that type object and pass it to `ccall` as `Any`.
+
+```rust,ignore
+use jlrs::{data::managed::value::typed::TypedValue, prelude::*};
+
+fn add(a: TypedValue<f64>, b: TypedValue<f64>) -> f64 {
+    let a = a.unbox::<f64>().unwrap();
+    let b = b.unbox::<f64>().unwrap();
+
+    a + b
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn add(a: TypedValue<f64>, b: TypedValue<f64>) -> f64;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.add(1.0, 2.0)
+3.0
+
+julia> JuliaModuleTutorial.add(1, 2.0)
+ERROR: MethodError: no method matching add(::Int64, ::Float64)
+
+Closest candidates are:
+  add(::Float64, ::Float64)
+```
+
+
+# Typed layouts
+
+If the layout of an immutable type has one or more elided type parameters, the layout doesn't map to a single Julia type and can't implement `ConstructType`. This prevents us from using it as an argument type, despite the fact that it could be passed by value. Just like `TypedValue` let us annotate a `Value` with its type constructor, we can use `TypedLayout` to annotate a layout with its type constructor.
+
+```rust,ignore
+use jlrs::{
+    data::{layout::typed_layout::TypedLayout, types::construct_type::ConstantBool},
+    prelude::*,
+};
+
+#[repr(C)]
+#[derive(Clone, Debug, Unbox, ValidLayout, Typecheck, ValidField, IsBits)]
+#[jlrs(julia_type = "Main.JuliaModuleTutorial.HasElided")]
+pub struct HasElided {
+    pub a: i32,
+}
+
+#[derive(ConstructType, HasLayout)]
+#[jlrs(
+    julia_type = "Main.JuliaModuleTutorial.HasElided",
+    constructor_for = "HasElided",
+    scope_lifetime = false,
+    data_lifetime = false,
+    layout_params = [],
+    elided_params = ["X"],
+    all_params = ["X"]
+)]
+pub struct HasElidedTypeConstructor<X> {
+    _x: ::std::marker::PhantomData<X>,
+}
+
+pub type HasElidedTrue = HasElidedTypeConstructor<ConstantBool<true>>;
+
+fn get_inner(he: TypedLayout<HasElided, HasElidedTrue>) -> i32 {
+    he.into_layout().a
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn get_inner(he: TypedLayout<HasElided, HasElidedTrue>) -> i32;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial
+       using JlrsCore.Wrap
+
+       struct HasElided{X}
+           a::Int32
+       end
+
+       @wrapmodule("./target/debug/libjulia_module_tutorial", :julia_module_tutorial_init_fn)
+
+       function __init__()
+           @initjlrs
+       end
+       end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.get_inner(JuliaModuleTutorial.HasElided{true}(1))
+1
+
+julia> JuliaModuleTutorial.get_inner(JuliaModuleTutorial.HasElided{1}(1))
+ERROR: MethodError: no method matching get_inner(::Main.JuliaModuleTutorial.HasElided{1})
+
+Closest candidates are:
+  get_inner(::Main.JuliaModuleTutorial.HasElided{true})
+```
+
+
+# Returning managed data
+
+We can return data by value as long as the return type is an `isbits` type, anything more complex must be returned as managed data. However, we run into an issue here: we'll need to create a scope before we can create managed data, and we need to return that data from the scope despite the lifetime constraints.
+
+To create a scope we'll need a handle, introducing: `WeakHandle`. A `WeakHandle` provides the same functionalty as the `LocalHandle` we've used in most embedding examples, but it doesn't shut down Julia when it's dropped. We can created them freely with the `weak_handle!` and `weak_handle_unchecked!` macros. The first confirms that the thread is in a state where it can call into Julia and is safe to use, the latter assumes this is the case and is therefore unsafe to use.
+
+While this at least gives us a way to create scopes, we still need to solve the other problem: how do we return managed data from a scope?
+
+Every managed type in jlrs has a `'scope` lifetime, to return managed data from the scope we'll need to erase this lifetime. jlrs takes the rootedness guarantee of managed types seriously, so we can't simply adjust the lifetime of such data directly. `Ref`-types don't guarantee that the data is rooted for its `'scope` lifetime, so we're free to relax it to `'static`, which solves our issue. We call this leaking managed data.
+
+In short, to return managed data we'll need to convert it to a `Ref` with static lifetimes first. All managed types have a `Ret` alias, which is the `Ref` alias with static lifetimes. These `Ret`-aliases implement `CCallReturn`. Converting managed data to a `Ret` type is a matter of calling `Managed::leak`.
+
+```rust,ignore
+use jlrs::{
+    data::managed::value::typed::{TypedValue, TypedValueRet},
+    prelude::*,
+    weak_handle,
+};
+
+fn add(a: f64, b: f64) -> TypedValueRet<f64> {
+    match weak_handle!() {
+        Ok(handle) => TypedValue::new(handle, a + b).leak(),
+        _ => panic!("not called from Julia"),
+    }
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn add(a: f64, b: f64) -> TypedValueRet<f64>;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.add(1.0, 2.0)
+3.0
+```
+
+We didn't have to create a scope because a `WeakHandle` is a non-rooting target itself. We can skip rooting the data because we call no other functions that could hit a safepoint before returning from `add`. The `weak_handle!` macro must be used in combination with `match` or `if let`, we can't `unwrap` or `expect` it.
+
+We can return arrays the same way, all `ArrayBase` aliases have a `Ret`-alias.
+
+```rust,ignore
+use jlrs::{data::managed::array::TypedMatrixRet, prelude::*, weak_handle};
+
+fn new_matrix(rows: usize, cols: usize) -> TypedMatrixRet<f64> {
+    match weak_handle!() {
+        Ok(handle) => {
+            let data = vec![0.0f64; rows * cols];
+            TypedMatrix::from_vec(handle, data, [rows, cols])
+                .expect("size invalid")
+                .expect("caught exception")
+                .leak()
+        }
+        _ => panic!("not called from Julia"),
+    }
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn new_matrix(rows: usize, cols: usize) -> TypedMatrixRet<f64>;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.new_matrix(UInt(4), UInt(2))
+4×2 Matrix{Float64}:
+ 0.0  0.0
+ 0.0  0.0
+ 0.0  0.0
+ 0.0  0.0
+```
+
+
+# `CCallRef`
+
+In the previous chapter we saw how we could wrap an argument type in `ccall` with `Ref` to guarantee it was passed by reference. We can use `CCallRef` to achieve this when we export functions with `julia_module!`.
+
+When `CCallRef<T>` is used as an argument type, the generated function restricts the argument type to `T`, it's passed to `ccall` as `Ref{T}`. One important detail that we must keep in mind when using `CCallRef` as an argument type is that the argument is only guaranteed to be passed by reference, not that the argument is managed data.[^1]
+
+If `CCallRefRet<T>` is used as a return type, `ccall` returns it as `Ref{T}` and the function as `T`. The main advantage returning `CCallRefRet<T>` has over `TypedValueRet<T>` is that using `CCallRefRet` produces more type-stable code.
+
+```rust,ignore
+use jlrs::{
+    data::managed::{
+        ccall_ref::{CCallRef, CCallRefRet},
+        value::typed::TypedValue,
+    },
+    prelude::*,
+    weak_handle,
+};
+
+fn add(a: CCallRef<f64>, b: CCallRef<f64>) -> CCallRefRet<f64> {
+    let a = a.as_ref().expect("incompatible layout");
+    let b = b.as_ref().expect("incompatible layout");
+
+    match weak_handle!() {
+        Ok(handle) => CCallRefRet::new(TypedValue::new(handle, a + b).leak()),
+        Err(_) => panic!("not called from Julia"),
+    }
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn add(a: CCallRef<f64>, b: CCallRef<f64>) -> CCallRefRet<f64>;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.add(1.0, 2.0)
+3.0
+```
+
+[^1]: While both are pointers to the same layout, managed data is guaranteed to be preceded in memory by a tag that identifies its type. This tag isn't guaranteed to be present when an argument is passed by reference.
+
+
+# Throwing exceptions
+
+Throwing an exception is a matter of returning either `Result<T, ValueRet>` or `JlrsResult<T>`. If the error variant is returned it's thrown as an exception, otherwise the result is unwrapped and returned to Julia.
+
+```rust,ignore
+use jlrs::{data::managed::value::ValueRet, prelude::*, weak_handle};
+
+fn throws_exception() -> Result<(), ValueRet> {
+    match weak_handle!() {
+        Ok(handle) => {
+            // We're just throwing (and catching) an exception
+            let res = unsafe { Value::eval_string(&handle, "throw(ErrorException(\"Oops\"))") };
+            match res {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.leak()),
+            }
+        }
+        _ => panic!("not called from Julia"),
+    }
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn throws_exception() -> Result<(), ValueRet>;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.throws_exception()
+ERROR: Oops
+Stacktrace:
+ [1] top-level scope
+   @ REPL[2]:1
+```
+
+Many methods in jlrs have a name ending in `unchecked`, these methods don't catch exceptions. If such a method is called and an exception is thrown, there must be no pending drops because control flow will directly jump back to Julia. It's recommended to always catch exceptions and rethrow them as in the example.
+
+
+# GC-safety
+
+All the examples we've seen involve trivial code that takes almost no time to run. In realistic scenario's, though, there's a good chance we want to call a function that doesn't call into Julia and takes a long time to run. If we don't call into Julia we won't hit any safepoints. This is a problem if we use multiple threads; if the GC needs to run, any thread that hits a safepoint will wait there until the GC is done, so if one thread is not hitting any safepoints, the other threads will quickly be blocked.
+
+A thread that can call into Julia is normally in a GC-unsafe state, the unsafe here means that the GC must wait until the thread has reached a safepoint before it can run. We can also put it in a GC-safe state where the GC can assume the thread won't call into Julia and doesn't need to wait until that thread has reached a safepoint.
+
+If an exported function doesn't need to call into Julia at all, we can ensure it's called in a GC-safe state by annotating the export with `#[gc_safe]`. To simulate a long-running function we're going to sleep for a few seconds.
+
+```rust,ignore
+use std::{thread::sleep, time::Duration};
+
+use jlrs::prelude::*;
+
+fn add(a: f64, b: f64) -> f64 {
+    sleep(Duration::from_secs(5));
+    a + b
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    #[gc_safe]
+    fn add(a: f64, b: f64) -> f64;
+}
+```
+
+We can manually create gc-safe blocks.
+
+```rust,ignore
+use std::{thread::sleep, time::Duration};
+
+use jlrs::{data::managed::array::TypedVectorRet, memory::gc::gc_safe, prelude::*, weak_handle};
+
+fn some_operation(len: usize) -> TypedVectorRet<f64> {
+    match weak_handle!() {
+        Ok(handle) => {
+            // Safety: we don't call into Julia in this GC-safe block
+            let data = unsafe {
+                gc_safe(|| {
+                    sleep(Duration::from_secs(5));
+                    vec![0.0f64; len]
+                })
+            };
+
+            TypedVector::from_vec(handle, data, len)
+                .expect("size invalid")
+                .expect("caught exception")
+                .leak()
+        }
+        _ => panic!("not called from Julia"),
+    }
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn some_operation(len: usize) -> TypedVectorRet<f64>;
+}
+```
+
+It's possible to revert to a GC-unsafe state in a GC-safe block by inserting a GC-unsafe block with `gc_unsafe`.
+
+```rust,ignore
+use std::{thread::sleep, time::Duration};
+
+use jlrs::{
+    data::managed::array::TypedVectorRet,
+    memory::gc::{gc_safe, gc_unsafe},
+    prelude::*,
+};
+
+fn some_operation(len: usize) -> TypedVectorRet<f64> {
+    // Safety: we don't call into Julia in this GC-safe block except in the GC-unsafe block
+    unsafe {
+        gc_safe(|| {
+            sleep(Duration::from_secs(5));
+            let data = vec![0.0f64; len];
+
+            gc_unsafe(|unrooted| {
+                TypedVector::from_vec(unrooted, data, len)
+                    .expect("size invalid")
+                    .expect("caught exception")
+                    .leak()
+            })
+        })
+    }
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn some_operation(len: usize) -> TypedVectorRet<f64>;
+}
+```
+
+
+# Opaque and foreign types
+
+In the previous section we've seen how an exported function can take and return data, which was always backed by some type that exists in Julia. In the previous chapter, when we avoided using jlrs entirely, we saw that if we wanted to expose custom types we had to hide them behind void pointers. Because we're no longer avoiding jlrs, we can create new types for our custom types and use them in the exported API.
+
+We'll see that we can distinguish between two kinds of custom types, opaque and foreign types. Opaque types are opaque to Julia and can't reference managed data. Foreign types can reference managed data, we'll need to implement a custom mark function so the GC can find those references.
+
+
+# `OpaqueType`
+
+The `OpaqueType` trait is the simplest way to expose a Rust type to Julia, for most intents and purposes it's just a marker trait. It's an unsafe trait because we have to initialize the type before we can use it, but this will be handled by exporting it. An opaque type can't reference managed data in any way: the layout of this type is unknown to Julia, so the GC would be unable to find those references. Besides not referencing any Julia data, it can't contain any references to Rust data either and must be thread-safe[^1]. An opaque type may only be used by the library that defines it.
+
+Any type that implements `OpaqueType` can be exported by adding `struct {{Type}}` to `julia_module!`. When the initialization-function is called, a new mutable type with that name is created in the wrapping module.
+
+A type just by itself isn't useful, if we tried to export it we'd find the type in our module, but we'd be unable to do anything with it. We can export an opaque type's associated functions and methods almost as easily as we can export other functions, the only additional thing we need to do is prefix the export with `in {{Type}}`. Methods can take `&self` and `&mut self`, if the type implements `Clone` it can also take `self`. The `self` argument is tracked before it's dereferenced to prevent mutable aliasing, it's possible to opt out of this by annotating the method with `#[untracked_self]`.
+
+```rust,ignore
+use jlrs::{
+    data::{
+        managed::{ccall_ref::CCallRefRet, value::typed::TypedValue},
+        types::foreign_type::OpaqueType,
+    },
+    prelude::*,
+    weak_handle,
+};
+
+#[derive(Debug)]
+struct OpaqueInt {
+    _a: i32,
+}
+
+unsafe impl OpaqueType for OpaqueInt {}
+
+impl OpaqueInt {
+    fn new(a: i32) -> CCallRefRet<OpaqueInt> {
+        match weak_handle!() {
+            Ok(handle) => CCallRefRet::new(TypedValue::new(handle, OpaqueInt { _a: a }).leak()),
+            Err(_) => panic!("not called from Julia"),
+        }
+    }
+
+    fn print(&self) {
+        println!("{:?}", self)
+    }
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    struct OpaqueInt;
+
+    in OpaqueInt fn new(a: i32) -> CCallRefRet<OpaqueInt> as OpaqueInt;
+
+    #[untracked_self]
+    in OpaqueInt fn print(&self);
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> v =  JuliaModuleTutorial.OpaqueInt(Int32(3))
+Main.JuliaModuleTutorial.OpaqueInt()
+
+julia> JuliaModuleTutorial.print(v)
+OpaqueInt { _a: 3 }
+```
+
+Note that `OpaqueInt::new` has been renamed to `OpaqueInt` to serve as a constructor. We don't need to track `self` when we call `print` because we never create a mutable reference to `self`.
+
+[^1]: I.e., the type must be `'static`, `Send` and `Sync`.
+
+
+# `ForeignType`
+
+Foreign types are very similar to opaque types, the main difference is that a foreign type can contain references to managed data. Instead of `OpaqueType` we'll need to implement `ForeignType`. When we implement this trait, we have to provide a mark function to let the GC find these references.
+
+Like `OpaqueType`, implementations of `ForeignType` must be thread-safe. A foreign type may only be used in the library that defines it. Fields that reference managed data must use `Ret`-aliases because the `'scope` lifetime has to be erased. One thing that's important to keep in mind is that we whenever we change what managed data is referenced by a field, we must insert a write barrier after this mutation. See [this footnote] for more information.
+
+To implement the associated `mark` function[^1] we'll need to use `mark_queue_obj` and `mark_queue_objarray` to mark every reference to managed data. We need to sum the result of every call to `mark_queue_obj` and return this sum; `mark_queue_objarray` can be used to mark a slice of references to managed data, this operation doesn't affect the sum.
+
+```rust,ignore
+use jlrs::{
+    data::{
+        managed::value::{
+            typed::{TypedValue, TypedValueRet},
+            ValueRet,
+        },
+        memory::PTls,
+        types::foreign_type::ForeignType,
+    },
+    memory::gc::{mark_queue_obj, write_barrier},
+    prelude::*,
+    weak_handle,
+};
+
+pub struct ForeignWrapper {
+    a: ValueRet,
+    b: ValueRet,
+}
+
+// Safety: Tracking `self` guarantees access to a `ForeignWrapper` is thread-safe.
+unsafe impl Send for ForeignWrapper {}
+unsafe impl Sync for ForeignWrapper {}
+
+unsafe impl ForeignType for ForeignWrapper {
+    fn mark(ptls: PTls, data: &Self) -> usize {
+        // Safety: We mark all referenced managed data.
+        unsafe {
+            let mut n_marked = 0;
+            n_marked += mark_queue_obj(ptls, data.a) as usize;
+            n_marked += mark_queue_obj(ptls, data.b) as usize;
+            n_marked
+        }
+    }
+}
+
+impl ForeignWrapper {
+    fn new(a: Value<'_, 'static>, b: Value<'_, 'static>) -> TypedValueRet<ForeignWrapper> {
+        match weak_handle!() {
+            Ok(handle) => {
+                let data = ForeignWrapper {
+                    a: a.leak(),
+                    b: b.leak(),
+                };
+                TypedValue::new(handle, data).leak()
+            }
+            Err(_) => panic!("not called from Julia"),
+        }
+    }
+
+    fn set_a(&mut self, a: Value<'_, 'static>) {
+        // Safety: we insert a write barrier after mutating the field
+        unsafe {
+            self.a = a.leak();
+            write_barrier(self, a);
+        }
+    }
+
+    fn get_a(&self) -> ValueRet {
+        self.a
+    }
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    struct ForeignWrapper;
+
+    in ForeignWrapper fn new(a: Value<'_, 'static>, b: Value<'_, 'static>)
+        -> TypedValueRet<ForeignWrapper> as ForeignWrapper;
+
+    in ForeignWrapper fn set_a(&mut self, a: Value<'_, 'static>);
+
+    in ForeignWrapper fn get_a(&self) -> ValueRet;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> x = JuliaModuleTutorial.ForeignWrapper(1, 2)
+Main.JuliaModuleTutorial.ForeignWrapper()
+
+julia> JuliaModuleTutorial.get_a(x)
+1
+
+julia> JuliaModuleTutorial.set_a(x, 4)
+
+julia> JuliaModuleTutorial.get_a(x)
+4
+```
+
+[this footnote]: ../../11-ccall-basics/argument-types/argument-types.md#1
+
+[^1]: Yes, the signature of `mark` is odd. It takes `PTls` as its first argument for consistency with `mark_queue_*` and other functions in the Julia C API which take `PTls` explicitly.
+
+
+# Generic functions
+
+All functions in Julia are generic, we can add new methods as long as the argument types are different from existing methods. If a generic function in Rust takes an argument `T`, we can export it multiple times with different types.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn return_first_arg<T>(a: T, _b: T) -> T {
+    a
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    for T in [isize, f64] {
+        fn return_first_arg<T>(a: T, b: T) -> T;
+    }
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.return_first_arg(1, 2)
+1
+
+julia> JuliaModuleTutorial.return_first_arg(1.0, 2.0)
+1.0
+
+julia> JuliaModuleTutorial.return_first_arg(1.0, 2)
+ERROR: MethodError: no method matching return_first_arg(::Float64, ::Int64)
+
+Closest candidates are:
+  return_first_arg(::Float64, ::Float64)
+   @ Main.JuliaModuleTutorial none:0
+  return_first_arg(::Int64, ::Int64)
+   @ Main.JuliaModuleTutorial none:0
+```
+
+It's not necessary to use this for-loop construction, it's also valid to repeat the export with the generic types filled in.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn return_first_arg<T>(a: T, _b: T) -> T {
+    a
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn return_first_arg(a: isize, b: isize) -> isize;
+    fn return_first_arg(a: f64, b: f64) -> f64;
+}
+```
+
+A type parameter may appear in arbitrary positions, the next example requires enabling the `complex` feature.
+
+```rust,ignore
+use jlrs::{data::layout::complex::Complex, prelude::*};
+
+fn real_part<T>(a: Complex<T>) -> T {
+    a.re
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    for T in [f32, f64] {
+        fn real_part<T>(a: Complex<T>) -> T;
+    }
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.real_part(ComplexF32(1.0, 2.0))
+1.0f0
+
+julia> JuliaModuleTutorial.real_part(ComplexF64(1.0, 2.0))
+1.0
+```
+
+
+# Parametric opaque types
+
+The `OpaqueType` and `ForeignType` traits create new Julia types without any type parameters, so we can't use these traits when the type has one or more parameters that we want to expose to Julia. Instead, we'll need to implement the `ParametricBase` and `ParametricVariant` traits.
+
+`ParametricBase` describes the type when its parameters haven't been set to an explicit type. We have to provide a `Key` type which doesn't depend on any of the generics, and the names of all type parameters our Julia type will have. `ParametricVariant` describes a specific variant of the parameteric type and we must provide type constructors for all generics. A parametric opaque type must be exported with every combination of generics that we want to use.
+
+```rust,ignore
+use jlrs::{
+    data::{
+        managed::value::typed::{TypedValue, TypedValueRet},
+        types::{
+            construct_type::ConstructType,
+            foreign_type::{ParametricBase, ParametricVariant},
+        },
+    },
+    impl_type_parameters, impl_variant_parameters,
+    prelude::*,
+    weak_handle,
+};
+
+pub struct ParametricOpaque<T, U> {
+    a: T,
+    b: U,
+}
+
+impl<T, U> ParametricOpaque<T, U>
+where
+    T: 'static + Send + Sync + Copy + ConstructType,
+    U: 'static + Send + Sync + Copy + ConstructType,
+{
+    fn new(a: T, b: U) -> TypedValueRet<ParametricOpaque<T, U>> {
+        match weak_handle!() {
+            Ok(handle) => {
+                let data = ParametricOpaque { a, b };
+                TypedValue::new(handle, data).leak()
+            }
+            Err(_) => panic!("not called from Julia"),
+        }
+    }
+
+    fn get_a(&self) -> T {
+        self.a
+    }
+
+    fn set_b(&mut self, b: U) -> U {
+        let old = self.b;
+        self.b = b;
+        old
+    }
+}
+
+// Safety: we've correctly mapped the generics to type parameters
+unsafe impl<T, U> ParametricBase for ParametricOpaque<T, U>
+where
+    T: 'static + Send + Sync + Copy + ConstructType,
+    U: 'static + Send + Sync + Copy + ConstructType,
+{
+    type Key = ParametricOpaque<(), ()>;
+    impl_type_parameters!('T', 'U');
+}
+
+// Safety: we've correctly mapped the generics to variant parameters
+unsafe impl<T, U> ParametricVariant for ParametricOpaque<T, U>
+where
+    T: 'static + Send + Sync + Copy + ConstructType,
+    U: 'static + Send + Sync + Copy + ConstructType,
+{
+    impl_variant_parameters!(T, U);
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    for T in [f32, f64] {
+        for U in [f32, f64] {
+            struct ParametricOpaque<T, U>;
+
+            in ParametricOpaque<T, U> fn new(a: T, b: U) -> TypedValueRet<ParametricOpaque<T, U>> as ParametricOpaque;
+
+            in ParametricOpaque<T, U> fn get_a(&self) -> T;
+            in ParametricOpaque<T, U> fn set_b(&mut self, b: U) -> U;
+        }
+    }
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> typeof(JuliaModuleTutorial.ParametricOpaque)
+UnionAll
+
+julia> v = JuliaModuleTutorial.ParametricOpaque(1.0, float(2.0))
+Main.JuliaModuleTutorial.ParametricOpaque{Float64, Float64}()
+
+julia> JuliaModuleTutorial.get_a(v)
+1.0
+
+julia> methods(JuliaModuleTutorial.set_b)
+# 4 methods for generic function "set_b" from Main.JuliaModuleTutorial:
+ [1] set_b(arg1::Main.JuliaModuleTutorial.ParametricOpaque{Float64, Float64}, arg2::Float64)
+     @ none:0
+ [2] set_b(arg1::Main.JuliaModuleTutorial.ParametricOpaque{Float64, Float32}, arg2::Float32)
+     @ none:0
+ [3] set_b(arg1::Main.JuliaModuleTutorial.ParametricOpaque{Float32, Float64}, arg2::Float64)
+     @ none:0
+ [4] set_b(arg1::Main.JuliaModuleTutorial.ParametricOpaque{Float32, Float32}, arg2::Float32)
+     @ none:0
+```
+
+
+# Type environment
+
+In every function we've exported so far, pretty much all argument and return types have been fully specified and have no remaining free type parameters.[^1] We can express types that have type parameters with `TypedValue`. To export such a function we'll need to provide a type environment that maps to the `where {T, U <: UpperBound}` part of the signature. If we tried to export it without an environment, `@wrapmodule` would fail with an `UndefVarError`.
+
+We can use the `tvar!` macro to create a type parameter, this macro only supports single-character names. To create a type parameter `C`, we use `tvar!('C')`. The environment can be created with the `tvars!` macro, which must contain all used parameters in a valid order. The types in the signature must not include any bounds, bounds must only be used in the environment. To create the typevar `C` with an upper bound, we use `tvar!('C'; UpperBoundType)` where `UpperBoundType` is the type constructor of the upper bound. Rust macro's don't like `<` in this position so the name and bounds are seperated with a semicolon instead of `<:`.
+
+```rust,ignore
+use jlrs::{
+    data::{
+        managed::value::typed::TypedValue,
+        types::abstract_type::{AbstractArray, AbstractFloat},
+    },
+    prelude::*,
+    tvar, tvars,
+};
+
+// We must include `T` and `N` before `A`
+// because `A` uses these parameters.
+type GenericEnv = tvars!(
+    tvar!('T'; AbstractFloat),
+    tvar!('N'),
+    tvar!('A'; AbstractArray<tvar!('T'), tvar!('N')>)
+);
+
+fn print_args(array: TypedValue<tvar!('A')>, data: TypedValue<tvar!('T')>) {
+    println!("Array:\n    {array:?}");
+    println!("Data:\n    {data:?}");
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    fn print_args(_array: TypedValue<tvar!('A')>, _data: TypedValue<tvar!('T')>) use GenericEnv;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> JuliaModuleTutorial.print_args([1.0 2.0], 3.0)
+Array:
+    1×2 Matrix{Float64}:
+ 1.0  2.0
+Data:
+    3.0
+
+julia> JuliaModuleTutorial.print_args([1.0f0 2.0f0], 3.0f0)
+Array:
+    1×2 Matrix{Float32}:
+ 1.0  2.0
+Data:
+    3.0f0
+
+julia> JuliaModuleTutorial.print_args([1.0f0 2.0f0], 3.0)
+ERROR: MethodError: no method matching print_args(::Matrix{Float32}, ::Float64)
+
+Closest candidates are:
+  print_args(::A, ::T) where {T<:AbstractFloat, N, A<:AbstractArray{T, N}}
+   @ Main.JuliaModuleTutorial none:0
+```
+
+To rename a function that uses a type environment, we have to put `as {{name}}` before `use {{EnvType}}`.
+
+[^1]: The exception being array types, which are internally treated as a special case to handle their free parameters.
+
+
+# Type aliases
+
+Sometimes we don't want to rename a type but create additional aliases for it, This is particularly useful with parametric opaque types whose constructor can't infer its parameters from the arguments.
+
+The syntax is `type {{Name}} = {{TypeConstructor}}`. The alias doesn't inherit any constructors, they must be defined for every alias separately.
+
+```rust,ignore
+use std::marker::PhantomData;
+
+use jlrs::{
+    data::{
+        managed::{ccall_ref::CCallRefRet, value::typed::TypedValue},
+        types::{
+            construct_type::ConstructType,
+            foreign_type::{ParametricBase, ParametricVariant},
+        },
+    },
+    impl_type_parameters, impl_variant_parameters,
+    prelude::*,
+    weak_handle,
+};
+
+pub struct HasParam<T> {
+    data: isize,
+    _param: PhantomData<T>,
+}
+
+impl<T> HasParam<T>
+where
+    T: 'static + Send + Sync + ConstructType,
+{
+    fn new(data: isize) -> CCallRefRet<HasParam<T>> {
+        match weak_handle!() {
+            Ok(handle) => {
+                let data = HasParam {
+                    data,
+                    _param: PhantomData,
+                };
+                CCallRefRet::new(TypedValue::new(handle, data).leak())
+            }
+            Err(_) => panic!("not called from Julia"),
+        }
+    }
+
+    fn data(&self) -> isize {
+        self.data
+    }
+}
+
+// Safety: we've correctly mapped the generics to type parameters
+unsafe impl<T> ParametricBase for HasParam<T>
+where
+    T: 'static + Send + Sync + ConstructType,
+{
+    type Key = HasParam<()>;
+    impl_type_parameters!('T');
+}
+
+// Safety: we've correctly mapped the generics to variant parameters
+unsafe impl<T> ParametricVariant for HasParam<T>
+where
+    T: 'static + Send + Sync + ConstructType,
+{
+    impl_variant_parameters!(T);
+}
+
+julia_module! {
+    become julia_module_tutorial_init_fn;
+
+    for T in [f32, f64] {
+        struct HasParam<T>;
+        in HasParam<T> fn data(&self) -> isize;
+    };
+
+    type HasParam32 = HasParam<f32>;
+    in HasParam<f32> fn new(data: isize) -> CCallRefRet<HasParam<f32>> as HasParam32;
+
+    type HasParam64 = HasParam<f64>;
+    in HasParam<f64> fn new(data: isize) -> CCallRefRet<HasParam<f64>> as HasParam64;
+}
+```
+
+```julia
+julia> module JuliaModuleTutorial ... end
+Main.JuliaModuleTutorial
+
+julia> d = JuliaModuleTutorial.HasParam32(1)
+Main.JuliaModuleTutorial.HasParam{Float32}()
+
+julia> JuliaModuleTutorial.data(d)
+1
+
+julia> d = JuliaModuleTutorial.HasParam64(2)
+Main.JuliaModuleTutorial.HasParam{Float64}()
+
+julia> JuliaModuleTutorial.data(d)
+2
+```
+
+
+# Yggdrasil and jlrs
+
+In the previous chapter we saw how we could write a recipe to build a Rust crate and contribute it to Yggdrasil to distribute it as a JLL package. When the crate we want to build depends on jlrs, we have to deal with a complication: we need to build the library against every version of Julia that we want to support, and enable the correct version feature at compile time. We'll also need to enable the `yggdrasil` feature. This requires a few adjustments to the recipe.
+
+We're going to assume the crate re-exposes the version and `yggdrasil` features:
+
+```toml
+[features]
+julia-1-6 = ["jlrs/julia-1-6"]
+julia-1-7 = ["jlrs/julia-1-7"]
+julia-1-8 = ["jlrs/julia-1-8"]
+julia-1-9 = ["jlrs/julia-1-9"]
+julia-1-10 = ["jlrs/julia-1-10"]
+julia-1-11 = ["jlrs/julia-1-11"]
+yggdrasil = ["jlrs/yggdrasil"]
+```
+
+The recipe should look as follows:
+
+```julia
+# Note that this script can accept some limited command-line arguments, run
+# `julia build_tarballs.jl --help` to see a usage message.
+using BinaryBuilder, Pkg
+
+# See https://github.com/JuliaLang/Pkg.jl/issues/2942
+# Once this Pkg issue is resolved, this must be removed
+uuid = Base.UUID("a83860b7-747b-57cf-bf1f-3e79990d037f")
+delete!(Pkg.Types.get_last_stdlibs(v"1.6.3"), uuid)
+
+name = "{{crate_name}}"
+version = v"0.1.0"
+julia_versions = [v"1.6.3", v"1.7", v"1.8", v"1.9", v"1.10", v"1.11"]
+
+# Collection of sources required to complete build
+sources = [
+    GitSource("https://github.com/{{user}}/{{crate_name}}.git",
+              "{full commit hash, e.g.: 52ab80563a07d02e3d142f85101853bbf5c0a8a1}"),
+]
+
+# Bash recipe for building across all platforms
+script = raw"""
+cd $WORKSPACE/srcdir/{{crate_name}}
+
+# This program prints the version feature that must be passed to `cargo build`
+# Adapted from ../../G/GAP/build_tarballs.jl
+# HACK: determine Julia version
+cat > version.c <<EOF
+#include <stdio.h>
+#include "julia/julia_version.h"
+int main(int argc, char**argv)
+{
+    printf("julia-%d-%d", JULIA_VERSION_MAJOR, JULIA_VERSION_MINOR);
+    return 0;
+}
+EOF
+${CC_BUILD} -I${includedir} -Wall version.c -o julia_version
+julia_version=$(./julia_version)
+
+cargo build --features yggdrasil,${julia_version} --release --verbose
+install_license LICENSE
+install -Dvm 0755 "target/${rust_target}/release/"*{{crate_name}}".${dlext}" "${libdir}/lib{{crate_name}}.${dlext}"
+"""
+
+include("../../L/libjulia/common.jl")
+platforms = vcat(libjulia_platforms.(julia_versions)...)
+
+# Rust toolchain for i686 Windows is unusable
+is_excluded(p) = Sys.iswindows(p) && nbits(p) == 32
+filter!(!is_excluded, platforms)
+
+# The products that we will ensure are always built
+products = [
+    LibraryProduct("lib{{crate_name}}", :librustfft),
+]
+
+# Dependencies that must be installed before this package can be built
+dependencies = [
+    BuildDependency("libjulia_jll"),
+    Dependency("Libiconv_jll"; platforms=filter(Sys.isapple, platforms)),
+]
+
+# Build the tarballs.
+build_tarballs(ARGS, name, version, sources, script, platforms, products, dependencies;
+               preferred_gcc_version=v"10", julia_compat="1.6", compilers=[:c, :rust])
+```
+
+The main differences with the recipe for a crate that doesn't depend on jlrs are:
+
+- The workaround for issue [#2942].
+- The supported versions of Julia are set.
+- A small executable that prints the version feature we need to enable is built and executed as part of the build script.
+- `libjulia/common.jl` is included.
+- Supported platforms are acquired via `libjulia_platforms`, not `supported_platforms`.
+- `libjulia_jll` is added to the dependencies as a build dependency.
+
+[#2942]: https://github.com/JuliaLang/Pkg.jl/issues/2942
+
+
+# Keyword arguments
+
+Calling a function with custom keyword arguments involves a few small steps:
+
+1. Create a `NamedTuple` with the custom arguments with `named_tuple!`.
+2. Provide those arguments to the function we want to call with `ProvideKeyword::provide_keywords`.
+3. Call the resulting `WithKeywords` instance with the positional arguments; `WithKeywords` implements `Call`.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 8>(|mut frame| {
+        unsafe {
+            let func = Value::eval_string(&mut frame, "add(a, b; c=3.0, d=4.0, e=5.0) = a + b + c + d + e")
+                .expect("an exception occurred");
+
+            let a = Value::new(&mut frame, 1.0);
+            let b = Value::new(&mut frame, 2.0);
+            let c = Value::new(&mut frame, 5.0);
+            let d = Value::new(&mut frame, 1.0);
+            let kwargs = named_tuple!(&mut frame, "c" => c, "d" => d);
+
+            let res = func.call2(&mut frame, a, b)
+                .expect("caught exception")
+                .unbox::<f64>()
+                .expect("not an f64");
+
+            assert_eq!(res, 15.0);
+
+            let func_with_kwargs = func
+                .provide_keywords(kwargs)
+                .expect("invalid keyword arguments");
+
+            let res = func_with_kwargs.call2(&mut frame, a, b)
+                .expect("caught exception")
+                .unbox::<f64>()
+                .expect("not an f64");
+
+            assert_eq!(res, 14.0);
+        };
+    });
+}
+```
+
+
+# Safety
+
+Over the course of this tutorial we've seen a lot of unsafe code, but we've never collected the expectations in a single place.
+
+The main idea behind how safety is modeled in jlrs is: a static view of Julia is safe. We're free to look at whatever's inside, as long as we don't execute any Julia code, either by evaluation or calling functions, or mutate data. Starting the runtime, creating scopes, accessing modules and other globals, accessing the fields of a `Value`, this is all perfectly safe behavior. Creating new managed data and accessing it is also safe, the lifetime rules guarantee we can only access it while it's safe to do so.
+
+Mutation is one of the main sources of unsafety, and is considered unsafe in general. There are many types which are mutable, but which must absolutely not be mutated. Take `DataType` for example. Yes, it's mutable, but we're very likely to trigger UB if we mutate one. It's also possible to create multiple mutable references to the same data if we're not careful, this is particularly easy to mess up with array data. Whenever we mutate data, we must guarantee that we're allowed to mutate this data, that there are no other active references to this data, and that a write barrier is inserted if necessary. This last point is handled automatically in most cases, the main exception is direct mutable access by tracking a `TypedValue`.
+
+Another source of unsafety is calling Julia functions. There is no unsafe keyword in Julia, but there definitely are functions that are unsafe to call. The most obvious example is `unsafe_load`, which lets us dereference arbitrary pointers. Its name might include `unsafe`, but we can call it just as easily as any other Julia function. Other problems are mostly due to thread-safety, Julia doesn't provide the same guarantees safe Rust does. Nothing prevents a function from spawning or interacting with tasks that access global data, we need to take care that we don't mutably alias this data and properly synchronize between threads.
+
+Evaluating arbitrary code is unsafe for the same reasons as calling Julia functions is. The same holds true for loading a custom system image.
+
+Safe functions that perform some operation that may throw an exception will catch that exception, unchecked functions don't catch exceptions and may skip other important checks as well, rendering them unsafe. Not catching an exception is problematic in functions that are called with `ccall` because we have to guarantee we don't jump over pending drops, using custom exception handlers is unsafe for the same reason. When Julia has been embedded, it's possible to write code that triggers an exception when no handler is available, e.g. by calling an unchecked function with invalid arguments in a scope. This is safe because the process is aborted if this happens.
+
+
+# When to leave things unrooted
+
+In this tutorial we've mostly used rooting targets to ensure the managed data we created would remain valid as long as we didn't leave the scope it was tied to. In many cases, though, we don't need to root managed data and can use a non-rooting target without running into any problems.
+
+Some data is globally rooted, most importantly constants defined in modules. When we access such constant data with `Module::get_global`, we can safely skip rooting it and convert the `Ref`-type to a managed type if we want to use it. If the data is global but not constant, it's safe to use it without rooting it if we can guarantee its value never changes as long as we use it from Rust.
+
+If a function returns an instance of a zero-sized type like `nothing` we don't need to root the result; there's only one, globally-rooted instance of a zero-sized type. Symbols and instances of booleans and 8-bit integers are also globally rooted.
+
+Finally, it's safe to leave data unrooted if we can guarantee the GC won't run until we're done using the data. The GC can be triggered whenever new managed data is allocated.[^1] If the GC determines it needs to run, every thread will be suspended when it reaches a safepoint. The GC runs when all threads have been suspended. If we don't call into Julia while we access the data, we won't hit a safepoint so we can leave it unrooted.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 1>(|mut frame| {
+        let func = Module::base(&frame)
+            .global(&frame, "println")
+            .expect("cannot find println in Base");
+
+        // Safety: println is globally rooted
+        let func = unsafe { func.as_value() };
+
+        let a = Value::new(&mut frame, 1.0);
+
+        // Safety: We're just calling println with a Float64 argument
+        let res = unsafe { func.call1(&frame, a).expect("caught exception") };
+
+        // Safety: println returns nothing, which is globally rooted
+        let res = unsafe { res.as_value() };
+        assert!(res.is::<Nothing>());
+    });
+}
+```
+
+[^1]: The GC can also be triggered manually with `Gc::gc_collect`, all targets implement this trait.
+
+
+# Caching Julia data
+
+Accessing data in a module can be expensive, especially if we need to access it often. These accesses can be cached with a `StaticRef`, which can be defined with the `define_static_ref!` macro and accessed with the `static_ref!` macro.
+
+```rust,ignore
+use jlrs::{define_static_ref, prelude::*, static_ref};
+
+define_static_ref!(ADD_FUNCTION, Value, "Base.+");
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 3>(|mut frame| {
+        let v1 = Value::new(&mut frame, 1.0f64);
+        let v2 = Value::new(&mut frame, 2.0f64);
+
+        let add_func = static_ref!(ADD_FUNCTION, &frame);
+        let res = unsafe { add_func.call2(&mut frame, v1, v2) }
+            .expect("caught an exception")
+            .unbox::<f64>()
+            .expect("wrong type");
+
+        assert_eq!(res, 3.0);
+    })
+}
+```
+
+It's possible to combine these two operations with `inline_static_ref!`, this is useful if we only need to use the data in a single function or want to expose a separate function to access it.
+
+```rust,ignore
+use jlrs::{inline_static_ref, prelude::*};
+
+#[inline]
+fn add_function<'target, Tgt>(target: &Tgt) -> Value<'target, 'static>
+where
+    Tgt: Target<'target>,
+{
+    inline_static_ref!(ADD_FUNCTION, Value, "Base.+", target)
+}
+
+fn main() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 3>(|mut frame| {
+        let v1 = Value::new(&mut frame, 1.0f64);
+        let v2 = Value::new(&mut frame, 2.0f64);
+
+        let add_func = add_function(&frame);
+        let res = unsafe { add_func.call2(&mut frame, v1, v2) }
+            .expect("caught an exception")
+            .unbox::<f64>()
+            .expect("wrong type");
+
+        assert_eq!(res, 3.0);
+    })
+}
+```
+
+A `StaticRef` is thread-safe: it's just an atomic pointer internally, which is initialized when it's first accessed. Any thread that can call into Julia can access it, if multiple threads try to access this data before it has been initialazed, all these threads will try to initialize it. The data is globally rooted so we don't need to root it ourselves.[^1]
+
+[^1]: One thing that's important to remember is that mutation can cause previously global data to become unreachable. It's our responsibility to guarantee we never change a global that's exposed as a `StaticRef`.
+
+
+# Cross-language LTO
+
+At the core of jlrs lives a small static library written in C. This library serves a few purposes:
+
+ - It hides implementation details of Julia's C API.
+ - It exposes functionality implemented in terms of macros and static inline functions.
+ - It provides work-arounds for backwards-incompatible changes.
+
+Many operations are delegated to this library, which tend to be very cheap compared to the overhead of calling a function. Because the library is written in C, these functions will never be inlined.
+
+If we use `clang` to build this library, we can enable cross-language LTO with the `lto` feature if `clang` and `rustc` use the same major LLVM version. We can query what version of clang we need to use with `rustc -vV`.
+
+```bash
+> rustc -vV
+rustc 1.80.1 (3f5fd8dd4 2024-08-06)
+binary: rustc
+commit-hash: 3f5fd8dd41153bc5fdca9427e9e05be2c767ba23
+commit-date: 2024-08-06
+host: x86_64-unknown-linux-gnu
+release: 1.80.1
+LLVM version: 18.1.7
+```
+
+The relevant information is in the final line: LLVM 18 is used, so we need to use clang-18.
+
+```bash
+RUSTFLAGS="-Clinker-plugin-lto -Clinker=clang-18 -Clink-arg=-fuse-ld=lld -Clink-args=-rdynamic" \
+CC=clang-18 \
+cargo build --release --features {{julia_version}}
+```
+
+Cross-language LTO has only been tested on Linux, it can be enabled for applications and dynamic libraries. It has no effect on the performance of Julia code, only on Rust code that calls into the intermediate library.
+
+
+# Testing applications
+
+When we test a binary crate that embeds Julia we have to keep in mind that Julia can only be initialized once. The easiest way to ensure this is by limiting ourselves to integration tests in a separate `tests` directory, and defining a single test per file. Each file in the `tests` directory is executed in a separate process, the single test ensures we only use Julia from a single thread.[^1] This approach applies to all runtimes.
+
+```rust,ignore
+use jlrs::prelude::*;
+
+fn test_case_1<'target, Tgt: Target<'target>>(_target: &Tgt) {}
+
+fn test_case_2<'target, Tgt: Target<'target>>(_target: &Tgt) {}
+
+#[test]
+fn test_fn() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+    handle.local_scope::<_, 0>(|frame| {
+        test_case_1(&frame);
+        test_case_2(&frame);
+    });
+}
+```
+
+This restriction doesn't apply to doctests, each doctest runs in a separate process.
+
+[^1]: Setting `--test-threads=1` doesn't allow multiple tests per file, the different tests would run sequentially but do so from different threads.
+
+
+# Testing libraries
+
+Testing a dynamic library is mostly a matter of embedding Julia in the testing application, but there are a few things to keep in mind.
+
+- To embed Julia we have to enable a runtime feature, but such a feature must not be enabled for library crates under normal circumstances.
+- To compile integration tests, we must build an `rlib`.
+- We have to call the generated init-function before calling functions that our library exports to Julia.
+- We can only call exported functions, not the generated `extern "C"` functions that would have been called from Julia.
+- Testing requires unwinding on panics, and we normally want to abort.
+
+To deal with the first two limitations we need to edit our `Cargo.toml` a bit.
+
+```toml
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+rt = ["jlrs/local-rt"] # Or any other runtime feature
+```
+
+The `rt` feature must not be enabled by default, we must only enable it when we test our code: `cargo test --features rt`. As always, the limitation that Julia can only be initialized once per process applies. Each integration test file in the tests directory must only contain a single test that initializes Julia and calls the generated init function. Our crate can similarly use just one test function that initializes Julia, so it's easiest to stick with integration tests.
+
+Let's test the following library:
+
+```rust,ignore
+use jlrs::{
+    data::{
+        managed::value::typed::{TypedValue, TypedValueRet},
+        types::foreign_type::OpaqueType,
+    },
+    prelude::*,
+    weak_handle,
+};
+
+#[derive(Debug)]
+pub struct OpaqueInt {
+    a: i32,
+}
+
+unsafe impl OpaqueType for OpaqueInt {}
+
+impl OpaqueInt {
+    pub fn new(a: i32) -> TypedValueRet<OpaqueInt> {
+        match weak_handle!() {
+            Ok(handle) => TypedValue::new(handle, OpaqueInt { a }).leak(),
+            Err(_) => panic!("not called from Julia"),
+        }
+    }
+
+    pub fn get_a(&self) -> i32 {
+        self.a
+    }
+
+    pub fn set_a(&mut self, a: i32) {
+        self.a = a;
+    }
+}
+
+julia_module! {
+    become testing_libraries_tutorial_init_fn;
+
+    struct OpaqueInt;
+
+    in OpaqueInt fn new(a: i32) -> TypedValueRet<OpaqueInt> as OpaqueInt;
+    in OpaqueInt fn get_a(&self) -> i32;
+    in OpaqueInt fn set_a(&mut self, a: i32);
+}
+```
+
+We'll call our library `testing_libraries_tutorial`. We can test it as follows:
+
+```rust,ignore
+use jlrs::prelude::*;
+use testing_libraries_tutorial::{testing_libraries_tutorial_init_fn, OpaqueInt};
+
+fn create_opaque_int<'target, Tgt: Target<'target>>(target: &Tgt) {
+    target.local_scope::<_, 1>(|mut frame| {
+        let opaque_int_ref = OpaqueInt::new(0);
+
+        // Safety: we immediately root the unrooted data.
+        let opaque_int = unsafe { opaque_int_ref.root(&mut frame) };
+
+        // Safety: this data hasn't been released to Julia yet
+        let tracked = unsafe { opaque_int.track_shared() }.expect("already tracked");
+
+        let a = tracked.get_a();
+        assert_eq!(a, 0);
+    });
+}
+
+fn mutate_opaque_int<'target, Tgt: Target<'target>>(target: &Tgt) {
+    target.local_scope::<_, 1>(|mut frame| {
+        let opaque_int_ref = OpaqueInt::new(0);
+
+        // Safety: we immediately root the unrooted data.
+        let mut opaque_int = unsafe { opaque_int_ref.root(&mut frame) };
+
+        {
+            // Safety: this data hasn't been released to Julia yet
+            let mut tracked = unsafe { opaque_int.track_exclusive() }.expect("already tracked");
+            tracked.set_a(1);
+        }
+
+        {
+            // Safety: this data hasn't been released to Julia yet
+            let tracked = unsafe { opaque_int.track_shared() }.expect("already tracked");
+            let a = tracked.get_a();
+            assert_eq!(a, 1);
+        }
+    });
+}
+
+#[test]
+fn it_works() {
+    let handle = Builder::new().start_local().expect("cannot init Julia");
+
+    handle.local_scope::<_, 0>(|frame| {
+        // Safety: we only call the init function once, all exported types
+        // will be created in the `Main` module. The second argument must
+        // be set to 1.
+        unsafe { testing_libraries_tutorial_init_fn(Module::main(&frame), 1) };
+
+        create_opaque_int(&frame);
+        mutate_opaque_int(&frame);
+    })
+}
+```
+
+We can see in these tests that we can track a `TypedValue` to acquire a reference to its internal data, which lets us call the type's methods. This matches the behavior of the generated `extern "C"` functions when they haven't been annotated with `#[untracked_self]`. If this annotation is present and we want to avoid tracking, we can access the internal pointer of a `Value` directly with `Value::data_ptr` and dereferencing it accordingly.
+
+
