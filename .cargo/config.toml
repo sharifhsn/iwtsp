@@ -1,2 +1,0 @@
-[target.linux]
-rustflags = [ "-C", "link-args=-rdynamic" ]
