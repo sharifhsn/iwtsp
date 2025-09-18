@@ -59,6 +59,10 @@ fn main() -> anyhow::Result<()> {
 
     let lower_bounds = &Z[..M];
     let upper_bounds = &Z[1..];
+
+    println!("lower_bounds len: {}", lower_bounds.len());
+    println!("upper_bounds len: {}", upper_bounds.len());
+
     let mut nl = Nlopt::new(
         nlopt::Algorithm::DirectL,
         M,
